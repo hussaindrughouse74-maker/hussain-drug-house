@@ -192,6 +192,7 @@
     font-size:10.5px;font-weight:700;padding:5px 9px;border-radius:20px;cursor:pointer;font-family:inherit;
   }
   .cloud-badge.on{background:#12463F;border-color:#3FA593;color:#8FE3D3;}
+  .cloud-badge.offline{background:#4A2E0B;border-color:#B4690E;color:#F3C98B;}
   .modal-overlay{
     position:fixed;inset:0;background:rgba(11,61,57,0.55);z-index:100;
     display:flex;align-items:flex-end;justify-content:center;
@@ -378,6 +379,14 @@ function initCloudIfConfigured(){
   try{
     fbApp = firebase.initializeApp(cfg);
     fsDB = firebase.firestore();
+    // Offline persistence: keeps a full local copy on the device, so the app
+    // keeps working (billing, purchases, returns) with zero internet. Anything
+    // done offline queues up and syncs automatically the moment internet returns.
+    fsDB.enablePersistence({synchronizeTabs:true}).catch(err=>{
+      console.warn('Offline persistence not enabled:', err.code);
+      // Not fatal — app still works fine online, it just won't function
+      // without internet on this particular browser/device.
+    });
   }catch(e){
     console.error('Firebase init failed', e);
     showCloudConnectError('Firebase could not start: '+e.message);
@@ -450,9 +459,18 @@ function attachCloudListeners(){
 function updateCloudBadge(){
   const el = document.getElementById('cloudBadge');
   if(!el) return;
-  el.textContent = CLOUD_MODE ? 'Cloud sync on' : 'Local only';
-  el.classList.toggle('on', CLOUD_MODE);
+  if(CLOUD_MODE && !navigator.onLine){
+    el.textContent = 'Offline — will sync';
+    el.classList.remove('on');
+    el.classList.add('offline');
+  } else {
+    el.textContent = CLOUD_MODE ? 'Cloud sync on' : 'Local only';
+    el.classList.toggle('on', CLOUD_MODE);
+    el.classList.remove('offline');
+  }
 }
+window.addEventListener('online', updateCloudBadge);
+window.addEventListener('offline', updateCloudBadge);
 
 async function savePurchaseCloud(){
   const valid = purchaseDraft.items.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
