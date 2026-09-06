@@ -1,0 +1,1457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Hussain Drug House</title>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-storage-compat.js"></script>
+<style>
+  :root{
+    --teal-900:#0B3D39;
+    --teal-700:#0F5C56;
+    --teal-500:#16847A;
+    --mint-100:#F1F6F4;
+    --amber-600:#B4690E;
+    --amber-100:#FBEBD6;
+    --red-700:#B3261E;
+    --red-100:#FBE9E7;
+    --ink-900:#1B2523;
+    --ink-500:#5B6B67;
+    --line:#DCE6E3;
+    --white:#FFFFFF;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,Roboto,Helvetica,Arial,sans-serif;
+    background:var(--mint-100);
+    color:var(--ink-900);
+    -webkit-tap-highlight-color:transparent;
+  }
+  #app{
+    max-width:460px;
+    margin:0 auto;
+    min-height:100vh;
+    background:var(--mint-100);
+    display:flex;
+    flex-direction:column;
+    position:relative;
+    padding-bottom:76px;
+  }
+  header.top{
+    background:var(--teal-900);
+    color:var(--white);
+    padding:16px 18px 20px;
+    position:sticky;
+    top:0;
+    z-index:20;
+  }
+  header.top .brand{
+    display:flex;
+    align-items:center;
+    gap:10px;
+  }
+  header.top .mark{
+    width:34px;height:34px;border-radius:9px;
+    background:var(--teal-500);
+    display:flex;align-items:center;justify-content:center;
+    font-weight:700;font-size:15px;
+    flex-shrink:0;
+  }
+  header.top .name{font-size:16.5px;font-weight:700;letter-spacing:0.1px;}
+  header.top .sub{font-size:11.5px;color:#B9D6D1;margin-top:1px;}
+  header.top .screen-title{margin-top:14px;font-size:20px;font-weight:700;}
+  header.top .screen-note{font-size:12.5px;color:#B9D6D1;margin-top:2px;}
+
+  main{flex:1;padding:14px 14px 8px;}
+
+  .card{
+    background:var(--white);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:14px;
+    margin-bottom:12px;
+  }
+  .card h3{margin:0 0 10px;font-size:14px;font-weight:700;color:var(--teal-900);}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
+  label{display:block;font-size:11.5px;color:var(--ink-500);margin-bottom:4px;font-weight:600;}
+  input, select{
+    width:100%;
+    padding:9px 10px;
+    border-radius:9px;
+    border:1.5px solid var(--line);
+    font-size:14px;
+    background:var(--white);
+    color:var(--ink-900);
+    font-family:inherit;
+  }
+  input:focus, select:focus{outline:none;border-color:var(--teal-500);}
+  .field{margin-bottom:10px;}
+  .btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:6px;
+    padding:11px 16px;border-radius:11px;border:none;
+    font-size:14px;font-weight:700;cursor:pointer;width:100%;
+  }
+  .btn-primary{background:var(--teal-700);color:var(--white);}
+  .btn-primary:active{background:var(--teal-900);}
+  .btn-ghost{background:var(--white);color:var(--teal-700);border:1.5px solid var(--teal-700);}
+  .btn-danger{background:var(--red-100);color:var(--red-700);border:1.5px solid #F0C6C3;}
+  .btn-sm{padding:7px 10px;font-size:12.5px;width:auto;border-radius:8px;}
+  .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  .stat{
+    background:var(--white);border:1px solid var(--line);border-radius:var(--radius);
+    padding:13px 14px;
+  }
+  .stat .num{font-size:20px;font-weight:800;color:var(--teal-900);}
+  .stat .lbl{font-size:11.5px;color:var(--ink-500);margin-top:2px;}
+  .alert{
+    display:flex;align-items:flex-start;gap:9px;
+    padding:10px 12px;border-radius:11px;margin-bottom:8px;font-size:13px;
+  }
+  .alert.amber{background:var(--amber-100);color:var(--amber-600);}
+  .alert.red{background:var(--red-100);color:var(--red-700);}
+  .alert .a-icon{font-size:15px;line-height:1;}
+  .list-row{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:10px 0;border-bottom:1px solid var(--line);
+  }
+  .list-row:last-child{border-bottom:none;}
+  .list-row .li-main{font-size:13.5px;font-weight:600;}
+  .list-row .li-sub{font-size:11.5px;color:var(--ink-500);margin-top:1px;}
+  .list-row .li-right{text-align:right;font-size:13.5px;font-weight:700;color:var(--teal-900);}
+  .tag{
+    display:inline-block;font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:6px;
+  }
+  .tag.low{background:var(--red-100);color:var(--red-700);}
+  .tag.exp{background:var(--amber-100);color:var(--amber-600);}
+  .tag.ok{background:#E4F2EE;color:var(--teal-700);}
+
+  nav.bottom{
+    position:fixed;bottom:0;left:50%;transform:translateX(-50%);
+    width:100%;max-width:460px;
+    background:var(--white);
+    border-top:1px solid var(--line);
+    display:flex;
+    z-index:30;
+    padding:6px 4px 8px;
+  }
+  nav.bottom .nav-btn{
+    flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;
+    padding:6px 2px;border-radius:10px;cursor:pointer;color:var(--ink-500);
+    background:none;border:none;font-family:inherit;
+  }
+  nav.bottom .nav-btn.active{color:var(--teal-700);background:var(--mint-100);}
+  nav.bottom .nav-icon{font-size:18px;}
+  nav.bottom .nav-lbl{font-size:10px;font-weight:700;}
+
+  .item-row-card{
+    border:1.5px solid var(--line);border-radius:12px;padding:11px;margin-bottom:10px;position:relative;
+  }
+  .item-row-card .rm{
+    position:absolute;top:8px;right:8px;background:none;border:none;color:var(--red-700);
+    font-size:16px;font-weight:800;cursor:pointer;padding:2px 6px;
+  }
+  .free-chip-row{display:flex;gap:6px;margin-top:6px;}
+  .chip{
+    border:1.5px solid var(--teal-500);color:var(--teal-700);background:var(--white);
+    border-radius:8px;padding:4px 9px;font-size:11.5px;font-weight:700;cursor:pointer;
+  }
+  .detected-tag{
+    display:inline-block;margin-top:6px;font-size:10.5px;background:var(--amber-100);color:var(--amber-600);
+    padding:3px 8px;border-radius:7px;font-weight:700;
+  }
+  .photo-box{
+    border:2px dashed var(--line);border-radius:12px;padding:16px;text-align:center;margin-bottom:12px;background:var(--mint-100);
+  }
+  .photo-box img{max-width:100%;border-radius:9px;margin-top:8px;}
+  .photo-box .hint{font-size:11.5px;color:var(--ink-500);margin-top:6px;}
+  .segment{display:flex;background:var(--mint-100);border-radius:10px;padding:3px;margin-bottom:12px;}
+  .segment button{
+    flex:1;border:none;background:none;padding:8px;border-radius:8px;font-size:12.5px;font-weight:700;
+    color:var(--ink-500);font-family:inherit;cursor:pointer;
+  }
+  .segment button.active{background:var(--white);color:var(--teal-700);box-shadow:0 1px 3px rgba(0,0,0,0.08);}
+  .empty{text-align:center;padding:26px 10px;color:var(--ink-500);font-size:13px;}
+  .empty .e-icon{font-size:26px;margin-bottom:8px;}
+  .total-line{display:flex;justify-content:space-between;font-size:13px;padding:4px 0;}
+  .total-line.grand{font-size:15px;font-weight:800;color:var(--teal-900);border-top:1.5px solid var(--line);margin-top:6px;padding-top:8px;}
+  .search-box{margin-bottom:12px;}
+  .banner-note{
+    background:var(--teal-900);color:#CFE7E3;font-size:11px;padding:8px 12px;border-radius:10px;margin-bottom:12px;line-height:1.4;
+  }
+  select.gst-select{margin-top:0;}
+  .field-inline{display:flex;gap:8px;align-items:flex-end;}
+
+  .cloud-badge{
+    flex-shrink:0;border:1.5px solid #2E7A72;background:rgba(255,255,255,0.06);color:#B9D6D1;
+    font-size:10.5px;font-weight:700;padding:5px 9px;border-radius:20px;cursor:pointer;font-family:inherit;
+  }
+  .cloud-badge.on{background:#12463F;border-color:#3FA593;color:#8FE3D3;}
+  .modal-overlay{
+    position:fixed;inset:0;background:rgba(11,61,57,0.55);z-index:100;
+    display:flex;align-items:flex-end;justify-content:center;
+  }
+  .modal-box{
+    background:var(--white);width:100%;max-width:460px;border-radius:18px 18px 0 0;
+    padding:16px;max-height:85vh;overflow-y:auto;
+  }
+  .modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;}
+  .modal-close{background:none;border:none;font-size:22px;color:var(--ink-500);cursor:pointer;line-height:1;}
+  textarea.config-input{
+    width:100%;min-height:110px;padding:10px;border-radius:9px;border:1.5px solid var(--line);
+    font-family:monospace;font-size:12px;
+  }
+  .step{font-size:12.5px;color:var(--ink-500);margin-bottom:8px;line-height:1.5;}
+  .step b{color:var(--ink-900);}
+
+  .doc-head{text-align:center;margin-bottom:14px;}
+  .doc-head .shop{font-size:16px;font-weight:800;color:var(--teal-900);}
+  .doc-head .addr{font-size:11px;color:var(--ink-500);margin-top:2px;}
+  .doc-head .doctitle{display:inline-block;margin-top:10px;font-size:12.5px;font-weight:700;background:var(--mint-100);padding:4px 12px;border-radius:20px;color:var(--teal-700);}
+  .doc-meta{display:flex;justify-content:space-between;font-size:12px;color:var(--ink-500);margin-bottom:10px;border-bottom:1px dashed var(--line);padding-bottom:10px;}
+  table.doc-table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px;}
+  table.doc-table th{text-align:left;font-size:10.5px;color:var(--ink-500);border-bottom:1.5px solid var(--line);padding:6px 4px;}
+  table.doc-table td{padding:6px 4px;border-bottom:1px solid var(--line);}
+  table.doc-table td.num, table.doc-table th.num{text-align:right;}
+
+  @media print{
+    body *{visibility:hidden;}
+    #printArea, #printArea *{visibility:visible;}
+    #printArea{position:absolute;top:0;left:0;width:100%;padding:0;}
+    header.top, nav.bottom, .no-print{display:none !important;}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header class="top">
+    <div class="brand">
+      <div class="mark">HD</div>
+      <div style="flex:1;">
+        <div class="name">Hussain Drug House</div>
+        <div class="sub">Pharmacy management</div>
+      </div>
+      <button id="cloudBadge" class="cloud-badge" onclick="openCloudModal()">Local only</button>
+    </div>
+    <div class="screen-title" id="screenTitle">Dashboard</div>
+    <div class="screen-note" id="screenNote">Today's summary at a glance</div>
+  </header>
+
+  <main id="main"></main>
+
+  <div id="cloudModal" class="modal-overlay" style="display:none;">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3 style="margin:0;font-size:15px;">Connect cloud sync</h3>
+        <button class="modal-close" onclick="closeCloudModal()">×</button>
+      </div>
+      <div id="cloudModalBody"></div>
+    </div>
+  </div>
+
+  <nav class="bottom">
+    <button class="nav-btn active" data-screen="dashboard">
+      <div class="nav-icon">⌂</div><div class="nav-lbl">Home</div>
+    </button>
+    <button class="nav-btn" data-screen="purchase">
+      <div class="nav-icon">＋</div><div class="nav-lbl">Purchase</div>
+    </button>
+    <button class="nav-btn" data-screen="sales">
+      <div class="nav-icon">₹</div><div class="nav-lbl">Sale</div>
+    </button>
+    <button class="nav-btn" data-screen="stock">
+      <div class="nav-icon">▤</div><div class="nav-lbl">Stock</div>
+    </button>
+    <button class="nav-btn" data-screen="reports">
+      <div class="nav-icon">◔</div><div class="nav-lbl">Reports</div>
+    </button>
+  </nav>
+</div>
+
+<script>
+/* ===================== DATA LAYER ===================== */
+const DB_KEY = 'hdh_pharmacy_db_v1';
+
+function loadDB(){
+  const raw = localStorage.getItem(DB_KEY);
+  if(raw){ try{ return JSON.parse(raw); }catch(e){} }
+  return { stock:[], purchases:[], sales:[], purchaseReturns:[], saleReturns:[], seqs:{} };
+}
+function saveDB(db){ localStorage.setItem(DB_KEY, JSON.stringify(db)); }
+let db = loadDB();
+if(!db.seqs) db.seqs = {}; // upgrade older saved data that used a single shared 'seq'
+
+function nextId(prefix){
+  if(!db.seqs[prefix]) db.seqs[prefix] = 1;
+  const id = prefix + '-' + String(db.seqs[prefix]).padStart(4,'0');
+  db.seqs[prefix] += 1;
+  return id;
+}
+function todayStr(){ return new Date().toISOString().slice(0,10); }
+function fmt(n){ return '₹' + (Math.round(n*100)/100).toLocaleString('en-IN'); }
+function daysUntil(dateStr){
+  const d = new Date(dateStr + '-01');
+  const diff = (d - new Date());
+  return Math.round(diff / (1000*60*60*24));
+}
+
+/* find or create stock row by item+batch */
+function findStock(itemName, batch){
+  return db.stock.find(s => s.itemName.trim().toLowerCase()===itemName.trim().toLowerCase() && s.batch.trim().toLowerCase()===batch.trim().toLowerCase());
+}
+
+/* ===================== CLOUD SYNC (FIREBASE) =====================
+   Local mode (default): everything above — data lives only on this device.
+   Cloud mode (once configured): same UI and functions, but reads/writes
+   go to a shared Firestore database + Storage bucket, so every phone and
+   computer signed in to the same Firebase project see the same live data.
+*/
+const FB_CONFIG_KEY = 'hdh_fb_config';
+let CLOUD_MODE = false;
+let fbApp=null, fsDB=null, fbStorage=null;
+
+function slugId(itemName,batch){
+  return (itemName+'_'+batch).toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,120) || ('item_'+Date.now());
+}
+
+function getStoredConfig(){
+  try{ return JSON.parse(localStorage.getItem(FB_CONFIG_KEY)); }catch(e){ return null; }
+}
+
+function openCloudModal(){
+  const body = document.getElementById('cloudModalBody');
+  const existing = getStoredConfig();
+  body.innerHTML = `
+    <div class="step">This connects the app to a <b>free Firebase project</b> (Google's cloud database) so stock, sales and purchases sync live across every phone and computer — no monthly fee for a single shop's volume.</div>
+    <div class="step">
+      <b>One-time setup (about 5 minutes):</b><br>
+      1. Go to <b>console.firebase.google.com</b> → Add project (any name).<br>
+      2. In the project, open <b>Build → Firestore Database</b> → Create database → Standard edition → start in <b>production mode</b>.<br>
+      3. Open <b>Build → Authentication</b> → Sign-in method → enable <b>Anonymous</b>.<br>
+      4. Go to Project settings (gear icon) → scroll to "Your apps" → click the <b>&lt;/&gt; web icon</b> → register app → copy the <b>firebaseConfig</b> object shown.<br>
+      5. Paste that whole object below and tap Connect.<br>
+      <i>Note: Storage is skipped on purpose — it now requires a billing account (Blaze plan). Bill photos are instead compressed and stored directly in Firestore, so no card is needed and everything stays on the free Spark plan.</i>
+    </div>
+    <div class="field"><label>Paste firebaseConfig here</label>
+      <textarea class="config-input" id="fbConfigInput" placeholder='{ "apiKey": "...", "authDomain": "...", "projectId": "...", "storageBucket": "...", "messagingSenderId": "...", "appId": "..." }'>${existing ? JSON.stringify(existing,null,2) : ''}</textarea>
+    </div>
+    <button class="btn btn-primary" onclick="connectCloud()">Connect</button>
+    ${existing ? `<button class="btn btn-danger" style="margin-top:8px;" onclick="disconnectCloud()">Disconnect & go back to local only</button>` : ''}
+    <div class="step" style="margin-top:10px;"><b>Firestore rules to paste</b> (Firestore → Rules tab) so only signed-in app users can read/write:<br>
+    <textarea class="config-input" readonly style="min-height:80px;">rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}</textarea></div>
+  `;
+  document.getElementById('cloudModal').style.display='flex';
+}
+function closeCloudModal(){ document.getElementById('cloudModal').style.display='none'; }
+
+function connectCloud(){
+  const raw = document.getElementById('fbConfigInput').value.trim();
+  let cfg;
+  try{ cfg = JSON.parse(raw); }
+  catch(e){ alert('That doesn\'t look like valid JSON. Copy the exact firebaseConfig object from Firebase and paste it as-is.'); return; }
+  if(!cfg.apiKey || !cfg.projectId){ alert('Missing apiKey or projectId — copy the full firebaseConfig object.'); return; }
+  localStorage.setItem(FB_CONFIG_KEY, JSON.stringify(cfg));
+  location.reload();
+}
+function disconnectCloud(){
+  if(!confirm('This switches the app back to local-only mode on this device. Your cloud data stays safe in Firebase — just paste the config again later to reconnect. Continue?')) return;
+  localStorage.removeItem(FB_CONFIG_KEY);
+  location.reload();
+}
+
+function initCloudIfConfigured(){
+  const cfg = getStoredConfig();
+  if(!cfg) return false;
+  try{
+    fbApp = firebase.initializeApp(cfg);
+    fsDB = firebase.firestore();
+  }catch(e){
+    console.error('Firebase init failed', e);
+    showCloudConnectError('Firebase could not start: '+e.message);
+    return false;
+  }
+  try{ fbStorage = firebase.storage(); }catch(e){ fbStorage = null; } // Storage is optional; bill photos are stored in Firestore instead (see ensureFirestoreSafePhoto)
+  firebase.auth().signInAnonymously().catch(err=>{
+    console.error('Anonymous sign-in failed', err);
+    showCloudConnectError('Sign-in failed: '+err.code+' — '+err.message);
+  });
+  firebase.auth().onAuthStateChanged(user=>{
+    if(user){
+      CLOUD_MODE = true;
+      updateCloudBadge();
+      attachCloudListeners();
+    }
+  });
+  // Safety net: if nothing has connected within 12 seconds, stop spinning forever
+  // and show what's actually wrong instead of a silent stuck screen.
+  setTimeout(()=>{
+    if(!CLOUD_MODE && currentScreen!=='printPreview'){
+      showCloudConnectError('Still not connected after 12 seconds. This usually means the Firestore security rules haven\'t been published yet, or the pasted config has a typo.');
+    }
+  }, 12000);
+  return true;
+}
+
+function showCloudConnectError(message){
+  if(CLOUD_MODE) return; // already connected by the time this fires, ignore
+  const main = document.getElementById('main');
+  if(!main) return;
+  main.innerHTML = `
+    <div class="card">
+      <h3>Couldn't connect to cloud sync</h3>
+      <div class="step" style="margin-bottom:10px;">${message}</div>
+      <div class="step" style="margin-bottom:10px;"><b>Things to check:</b><br>
+        1. Firestore Database → <b>Rules</b> tab → the rules were pasted and you tapped <b>Publish</b> (not just typed them in).<br>
+        2. Authentication → Sign-in method → <b>Anonymous</b> shows Enabled.<br>
+        3. The config pasted into this app exactly matches the one from Firebase → Project settings → Your apps (no missing commas/quotes).
+      </div>
+      <button class="btn btn-primary" onclick="location.reload()">Retry</button>
+      <button class="btn btn-ghost" style="margin-top:8px;" onclick="disconnectCloud()">Go back to local only</button>
+    </div>
+  `;
+}
+
+function attachCloudListeners(){
+  fsDB.collection('stock').onSnapshot(snap=>{
+    db.stock = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    render();
+  }, err=>{ console.error('stock listener', err); showCloudConnectError('Database error: '+err.code+' — '+err.message); });
+  fsDB.collection('purchases').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{
+    db.purchases = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    render();
+  }, err=>console.error('purchases listener', err));
+  fsDB.collection('sales').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{
+    db.sales = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    render();
+  }, err=>console.error('sales listener', err));
+  fsDB.collection('purchaseReturns').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{
+    db.purchaseReturns = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    render();
+  }, err=>console.error('purchaseReturns listener', err));
+  fsDB.collection('saleReturns').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{
+    db.saleReturns = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    render();
+  }, err=>console.error('saleReturns listener', err));
+}
+
+function updateCloudBadge(){
+  const el = document.getElementById('cloudBadge');
+  if(!el) return;
+  el.textContent = CLOUD_MODE ? 'Cloud sync on' : 'Local only';
+  el.classList.toggle('on', CLOUD_MODE);
+}
+
+async function savePurchaseCloud(){
+  const valid = purchaseDraft.items.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
+  if(!valid.length){ alert('Add at least one item with name, batch and quantity before saving.'); return; }
+  try{
+    let photoData = null;
+    if(purchaseDraft.photo){
+      photoData = await ensureFirestoreSafePhoto(purchaseDraft.photo);
+    }
+    const batchWrite = fsDB.batch();
+    let totalAmount=0, totalGst=0;
+    valid.forEach(it=>{
+      const amt = Number(it.qty)*Number(it.rate);
+      const gstAmt = amt*Number(it.gst)/100;
+      totalAmount += amt; totalGst += gstAmt;
+      const stockRef = fsDB.collection('stock').doc(slugId(it.itemName, it.batch));
+      const patch = {
+        itemName: it.itemName.trim(), batch: it.batch.trim(),
+        purchaseRate: Number(it.rate), gst: Number(it.gst),
+        mrp: Number(it.rate)*1.2,
+        qty: firebase.firestore.FieldValue.increment(Number(it.qty)+Number(it.freeQty))
+      };
+      if(it.expiry) patch.expiry = it.expiry;
+      batchWrite.set(stockRef, patch, {merge:true});
+    });
+    const purchaseRef = fsDB.collection('purchases').doc();
+    batchWrite.set(purchaseRef, {
+      date: todayStr(), supplier: purchaseDraft.supplier||'Unknown supplier',
+      photo: photoData, items: valid, totalAmount, totalGst,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    await batchWrite.commit();
+    purchaseDraft = {photo:null, supplier:'', items:[]};
+    openPrintPreview('purchase', purchaseRef.id);
+  }catch(e){
+    console.error(e);
+    alert('Could not save to cloud: '+e.message);
+  }
+}
+
+async function saveSaleCloud(){
+  if(!saleDraft.items.length){ alert('Add at least one item to the bill.'); return; }
+  const saleRefHolder = {ref:null};
+  try{
+    await fsDB.runTransaction(async (tx)=>{
+      const refs = saleDraft.items.map(it=>fsDB.collection('stock').doc(it.stockId));
+      const snaps = await Promise.all(refs.map(r=>tx.get(r)));
+      snaps.forEach((snap,i)=>{
+        const it = saleDraft.items[i];
+        const needed = Number(it.qty)+Number(it.freeQty);
+        const avail = snap.exists ? (snap.data().qty||0) : 0;
+        if(avail < needed) throw new Error(`Not enough stock for ${it.itemName} (batch ${it.batch}). Available: ${avail}`);
+      });
+      let totalAmount=0, totalGst=0, totalDiscount=0;
+      snaps.forEach((snap,i)=>{
+        const it = saleDraft.items[i];
+        const needed = Number(it.qty)+Number(it.freeQty);
+        tx.update(refs[i], {qty: firebase.firestore.FieldValue.increment(-needed)});
+        const amt = Number(it.qty)*Number(it.rate);
+        const disc = amt*Number(it.discount)/100;
+        const gstAmt = (amt-disc)*Number(it.gst)/100;
+        totalAmount += amt-disc; totalGst += gstAmt; totalDiscount += disc;
+      });
+      const saleRef = fsDB.collection('sales').doc();
+      saleRefHolder.ref = saleRef;
+      tx.set(saleRef, {
+        date: todayStr(), customer: saleDraft.customer||'Walk-in', items: saleDraft.items,
+        totalAmount: totalAmount+totalGst, totalGst, totalDiscount,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    });
+    saleDraft = {customer:'', items:[]};
+    openPrintPreview('sale', saleRefHolder.ref.id);
+    return;
+  }catch(e){
+    console.error(e);
+    alert(e.message);
+  }
+}
+
+/* ===================== BACKUP (local mode safety net) ===================== */
+function exportBackup(){
+  const blob = new Blob([JSON.stringify(db,null,2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'hussain-drug-house-backup-'+todayStr()+'.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+function importBackup(file){
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    try{
+      const parsed = JSON.parse(reader.result);
+      if(!confirm('This will replace all data currently on this device with the backup file. Continue?')) return;
+      db = parsed;
+      saveDB(db);
+      alert('Backup restored.');
+      render();
+    }catch(e){ alert('Could not read that file — make sure it\'s a backup exported from this app.'); }
+  };
+  reader.readAsText(file);
+}
+window.openCloudModal = openCloudModal;
+window.closeCloudModal = closeCloudModal;
+window.connectCloud = connectCloud;
+window.disconnectCloud = disconnectCloud;
+window.exportBackup = exportBackup;
+window.importBackup = importBackup;
+
+/* ===================== APP STATE / ROUTER ===================== */
+let currentScreen = 'dashboard';
+let purchaseDraft = { photo:null, supplier:'', items:[] };
+let saleDraft = { customer:'', items:[] };
+
+const titles = {
+  dashboard:['Dashboard','Today\'s summary at a glance'],
+  purchase:['New purchase','Scan or upload a bill, then confirm'],
+  sales:['New sale','Bill items with discount & free qty'],
+  stock:['Full stock','Live inventory, batch-wise'],
+  reports:['Reports','Daily & monthly summary'],
+  printPreview:['Document','Preview & print']
+};
+
+function setScreen(name){
+  currentScreen = name;
+  document.querySelectorAll('.nav-btn').forEach(b=>{
+    b.classList.toggle('active', b.dataset.screen===name);
+  });
+  document.getElementById('screenTitle').textContent = titles[name][0];
+  document.getElementById('screenNote').textContent = titles[name][1];
+  render();
+}
+document.querySelectorAll('.nav-btn').forEach(b=>{
+  b.addEventListener('click', ()=> setScreen(b.dataset.screen));
+});
+
+function render(){
+  const main = document.getElementById('main');
+  if(currentScreen==='printPreview'){ main.innerHTML = renderPrintPreview(); attachHandlers(); return; }
+  if(currentScreen==='dashboard') main.innerHTML = renderDashboard();
+  else if(currentScreen==='purchase') main.innerHTML = renderPurchase();
+  else if(currentScreen==='sales') main.innerHTML = renderSales();
+  else if(currentScreen==='stock') main.innerHTML = renderStock();
+  else if(currentScreen==='reports') main.innerHTML = renderReports();
+  attachHandlers();
+}
+
+/* ===================== DASHBOARD ===================== */
+function renderDashboard(){
+  const today = todayStr();
+  const todaySales = db.sales.filter(s=>s.date===today);
+  const todayPurchases = db.purchases.filter(p=>p.date===today);
+  const salesTotal = todaySales.reduce((a,s)=>a+s.totalAmount,0);
+  const purchaseTotal = todayPurchases.reduce((a,p)=>a+p.totalAmount,0);
+  const lowStock = db.stock.filter(s=>s.qty>0 && s.qty<=10);
+  const nearExpiry = db.stock.filter(s=> s.qty>0 && daysUntil(s.expiry) <= 90 && daysUntil(s.expiry) >= 0);
+  const outOfStock = db.stock.filter(s=>s.qty<=0);
+
+  let alerts = '';
+  if(lowStock.length) alerts += `<div class="alert amber"><span class="a-icon">⚠</span><span>${lowStock.length} item(s) running low (≤10 units) — check Stock tab.</span></div>`;
+  if(nearExpiry.length) alerts += `<div class="alert red"><span class="a-icon">⏱</span><span>${nearExpiry.length} batch(es) expiring within 90 days.</span></div>`;
+  if(outOfStock.length) alerts += `<div class="alert amber"><span class="a-icon">✕</span><span>${outOfStock.length} item(s) are out of stock.</span></div>`;
+  if(!alerts) alerts = `<div class="alert" style="background:#E4F2EE;color:var(--teal-700);"><span class="a-icon">✓</span><span>No stock alerts right now.</span></div>`;
+
+  return `
+    <div class="stat-grid">
+      <div class="stat"><div class="num">${fmt(salesTotal)}</div><div class="lbl">Sales today</div></div>
+      <div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Purchases today</div></div>
+      <div class="stat"><div class="num">${todaySales.length}</div><div class="lbl">Bills today</div></div>
+      <div class="stat"><div class="num">${db.stock.filter(s=>s.qty>0).length}</div><div class="lbl">Items in stock</div></div>
+    </div>
+    <div class="card" style="margin-top:12px;">
+      <h3>Alerts</h3>
+      ${alerts}
+    </div>
+    <div class="card">
+      <h3>Quick actions</h3>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" onclick="setScreen('purchase')">+ Purchase</button>
+        <button class="btn btn-ghost" onclick="setScreen('sales')">+ Sale</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>${CLOUD_MODE ? 'Cloud sync' : 'Data & backup'}</h3>
+      ${CLOUD_MODE
+        ? `<div class="step" style="margin-bottom:8px;">Connected — this device reads and writes live to your Firebase project. Every other phone/computer signed in to the same project sees the same data instantly.</div>`
+        : `<div class="step" style="margin-bottom:8px;">Right now data only lives in this browser on this device. Connect cloud sync so all staff phones share the same live stock and bills, or export a backup as a safety net.</div>
+           <button class="btn btn-ghost" style="margin-bottom:8px;" onclick="openCloudModal()">Connect cloud sync</button>`
+      }
+      <button class="btn btn-ghost" onclick="exportBackup()">⬇ Export backup (.json)</button>
+      <label class="btn btn-ghost" style="margin-top:8px;display:flex;">
+        ⬆ Import backup
+        <input type="file" accept="application/json" style="display:none;" onchange="importBackup(this.files[0])"/>
+      </label>
+    </div>
+  `;
+}
+
+/* ===================== PURCHASE SCREEN ===================== */
+let purchaseMode = 'new';
+function renderPurchase(){
+  const modeSwitcher = `
+    <div class="segment">
+      <button class="${purchaseMode==='new'?'active':''}" onclick="purchaseMode='new';render()">New purchase</button>
+      <button class="${purchaseMode==='return'?'active':''}" onclick="purchaseMode='return';render()">Return to distributor</button>
+    </div>`;
+  if(purchaseMode==='return') return modeSwitcher + renderPurchaseReturn();
+
+  const itemsHtml = purchaseDraft.items.map((it,idx)=>`
+    <div class="item-row-card">
+      <button class="rm" onclick="removePurchaseItem(${idx})">×</button>
+      <div class="field"><label>Item name</label>
+        <input value="${it.itemName}" oninput="updatePurchaseItem(${idx},'itemName',this.value)" placeholder="e.g. Paracetamol 500mg"/>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Batch no.</label><input value="${it.batch}" oninput="updatePurchaseItem(${idx},'batch',this.value)"/></div>
+        <div class="field"><label>Expiry (MM/YYYY)</label><input value="${it.expiry}" oninput="updatePurchaseItem(${idx},'expiry',this.value)" placeholder="12/2027"/></div>
+      </div>
+      <div class="row3">
+        <div class="field"><label>Purchase qty</label><input type="number" value="${it.qty}" oninput="updatePurchaseItem(${idx},'qty',this.value)"/></div>
+        <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty}" oninput="updatePurchaseItem(${idx},'freeQty',this.value)"/></div>
+        <div class="field"><label>Rate/unit</label><input type="number" value="${it.rate}" oninput="updatePurchaseItem(${idx},'rate',this.value)"/></div>
+      </div>
+      <div class="field"><label>GST %</label>
+        <select class="gst-select" onchange="updatePurchaseItem(${idx},'gst',this.value)">
+          ${[0,5,12,18,28].map(g=>`<option value="${g}" ${Number(it.gst)===g?'selected':''}>${g}%</option>`).join('')}
+        </select>
+      </div>
+      <div class="free-chip-row">
+        <span class="chip" onclick="bumpFree(${idx},1)">+1 Free</span>
+        <span class="chip" onclick="bumpFree(${idx},2)">+2 Free</span>
+        <span class="chip" onclick="bumpFree(${idx},5)">+5 Free</span>
+      </div>
+      ${it.detected ? `<div class="detected-tag">Detected on bill: ${it.detected}</div>` : ''}
+      <div style="margin-top:8px;font-size:12px;color:var(--ink-500);">
+        Total stock added: <b>${(Number(it.qty)||0)+(Number(it.freeQty)||0)}</b> units &nbsp;•&nbsp; Value: <b>${fmt((Number(it.qty)||0)*(Number(it.rate)||0))}</b>
+      </div>
+    </div>
+  `).join('');
+
+  const totalValue = purchaseDraft.items.reduce((a,it)=>a+(Number(it.qty)||0)*(Number(it.rate)||0),0);
+  const totalGst = purchaseDraft.items.reduce((a,it)=>a+((Number(it.qty)||0)*(Number(it.rate)||0))*(Number(it.gst)||0)/100,0);
+
+  return modeSwitcher + `
+    <div class="banner-note">Prototype note: photo is stored on this device only (browser storage). A real deployment would upload it to cloud storage so all staff phones can see it.</div>
+
+    <div class="card">
+      <h3>Bill photo</h3>
+      <div class="photo-box">
+        ${purchaseDraft.photo ? `<img src="${purchaseDraft.photo}"/>` : `<div style="font-size:28px;">📷</div><div class="hint">Take a photo or upload the supplier's bill</div>`}
+        <input type="file" accept="image/*" capture="environment" id="photoInput" style="margin-top:10px;width:100%;"/>
+        <div class="hint">OCR auto-fill isn't wired up in this prototype — add items manually below. In the real app, this photo would attempt to auto-fill the fields, with everything still editable before saving.</div>
+      </div>
+      <div class="field"><label>Supplier name</label>
+        <input value="${purchaseDraft.supplier}" oninput="purchaseDraft.supplier=this.value" placeholder="e.g. Sundeep Distributors"/>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Items on this bill</h3>
+      ${itemsHtml || `<div class="empty"><div class="e-icon">📦</div>No items added yet.</div>`}
+      <button class="btn btn-ghost" onclick="addPurchaseItem()">+ Add item row</button>
+    </div>
+
+    ${purchaseDraft.items.length ? `
+    <div class="card">
+      <h3>Bill summary</h3>
+      <div class="total-line"><span>Taxable value</span><span>${fmt(totalValue)}</span></div>
+      <div class="total-line"><span>GST</span><span>${fmt(totalGst)}</span></div>
+      <div class="total-line grand"><span>Total</span><span>${fmt(totalValue+totalGst)}</span></div>
+    </div>` : ''}
+
+    <button class="btn btn-primary" onclick="savePurchase()">Confirm & save purchase</button>
+  `;
+}
+
+function addPurchaseItem(){
+  purchaseDraft.items.push({itemName:'',batch:'',expiry:'',qty:0,freeQty:0,rate:0,gst:12,detected:null});
+  render();
+}
+function removePurchaseItem(idx){ purchaseDraft.items.splice(idx,1); render(); }
+function updatePurchaseItem(idx,field,val){
+  purchaseDraft.items[idx][field] = (field==='itemName'||field==='batch'||field==='expiry') ? val : Number(val);
+  if(field!=='itemName' && field!=='batch' && field!=='expiry'){
+    // re-render totals without losing focus is tricky in vanilla; keep simple, re-render on blur-like fields only
+  }
+}
+function bumpFree(idx, n){
+  purchaseDraft.items[idx].freeQty = (Number(purchaseDraft.items[idx].freeQty)||0) + n;
+  render();
+}
+function savePurchase(){
+  if(CLOUD_MODE){ savePurchaseCloud(); return; }
+  const valid = purchaseDraft.items.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
+  if(!valid.length){ alert('Add at least one item with name, batch and quantity before saving.'); return; }
+  const id = nextId('PUR');
+  let totalAmount=0, totalGst=0;
+  valid.forEach(it=>{
+    const amt = Number(it.qty)*Number(it.rate);
+    const gstAmt = amt*Number(it.gst)/100;
+    totalAmount += amt; totalGst += gstAmt;
+    let stockRow = findStock(it.itemName, it.batch);
+    if(!stockRow){
+      stockRow = {id: slugId(it.itemName, it.batch), itemName:it.itemName.trim(), batch:it.batch.trim(), expiry:it.expiry, mrp:Number(it.rate)*1.2, purchaseRate:Number(it.rate), gst:Number(it.gst), qty:0};
+      db.stock.push(stockRow);
+    }
+    stockRow.qty += Number(it.qty)+Number(it.freeQty);
+    stockRow.purchaseRate = Number(it.rate);
+    if(it.expiry) stockRow.expiry = it.expiry;
+  });
+  db.purchases.push({id, date:todayStr(), supplier:purchaseDraft.supplier||'Unknown supplier', photo:purchaseDraft.photo, items:valid, totalAmount, totalGst});
+  saveDB(db);
+  purchaseDraft = {photo:null, supplier:'', items:[]};
+  openPrintPreview('purchase', id);
+}
+
+/* ---- Purchase Return (to distributor) ---- */
+let purchaseReturnDraft = { items:[] };
+function renderPurchaseReturn(){
+  const itemsHtml = purchaseReturnDraft.items.map((it,idx)=>`
+    <div class="item-row-card">
+      <button class="rm" onclick="removePurchaseReturnItem(${idx})">×</button>
+      <div class="li-main">${it.itemName} <span style="color:var(--ink-500);font-weight:500;">(Batch ${it.batch})</span></div>
+      <div class="li-sub">In stock: ${it.availableQty} units • Exp ${it.expiry||'—'}</div>
+      <div class="row2" style="margin-top:8px;">
+        <div class="field"><label>Return qty</label><input type="number" value="${it.qty}" onchange="updatePurchaseReturnItem(${idx},'qty',this.value)"/></div>
+        <div class="field"><label>Reason</label>
+          <select onchange="updatePurchaseReturnItem(${idx},'reason',this.value)">
+            ${['Expired','Damaged','Wrong item supplied','Excess stock','Other'].map(r=>`<option ${it.reason===r?'selected':''}>${r}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    </div>
+  `).join('');
+  const totalValue = purchaseReturnDraft.items.reduce((a,it)=>a+Number(it.qty)*Number(it.rate),0);
+  const totalGst = purchaseReturnDraft.items.reduce((a,it)=>a+Number(it.qty)*Number(it.rate)*Number(it.gst)/100,0);
+
+  return `
+    <div class="card">
+      <h3>Find item to return</h3>
+      <div class="field"><label>Search stock by item name</label>
+        <input id="pReturnSearch" placeholder="Type item name..." oninput="renderPReturnSearchResults(this.value)"/>
+      </div>
+      <div id="pReturnSearchResults"></div>
+      <div class="hint">Works for regular returns as well as expired stock — search finds every batch of that item, including ones near or past expiry.</div>
+    </div>
+    <div class="card">
+      <h3>Items being returned</h3>
+      ${itemsHtml || `<div class="empty"><div class="e-icon">↩</div>No items added yet.</div>`}
+    </div>
+    ${purchaseReturnDraft.items.length ? `
+    <div class="card">
+      <h3>Return summary</h3>
+      <div class="total-line"><span>Taxable value</span><span>${fmt(totalValue)}</span></div>
+      <div class="total-line"><span>GST</span><span>${fmt(totalGst)}</span></div>
+      <div class="total-line grand"><span>Total credit expected</span><span>${fmt(totalValue+totalGst)}</span></div>
+    </div>
+    <button class="btn btn-primary" onclick="savePurchaseReturn()">Confirm & save return</button>
+    ` : ''}
+  `;
+}
+function renderPReturnSearchResults(q){
+  const box = document.getElementById('pReturnSearchResults');
+  if(!q || q.trim().length<1){ box.innerHTML=''; return; }
+  const matches = db.stock.filter(s=> s.qty>0 && s.itemName.toLowerCase().includes(q.toLowerCase())).slice(0,8);
+  if(!matches.length){ box.innerHTML = `<div class="empty" style="padding:14px;">No matching stock found.</div>`; return; }
+  box.innerHTML = matches.map(s=>{
+    const dLeft = daysUntil(s.expiry);
+    const expTag = dLeft<=90 ? `<span class="tag exp" style="margin-left:6px;">Exp in ${dLeft}d</span>` : '';
+    return `
+    <div class="list-row" style="cursor:pointer;" onclick="pickStockForPReturn('${s.id}')">
+      <div><div class="li-main">${s.itemName}${expTag}</div><div class="li-sub">Batch ${s.batch} • Qty ${s.qty} • Exp ${s.expiry}</div></div>
+      <div class="li-right">${fmt(s.purchaseRate)}</div>
+    </div>`;
+  }).join('');
+}
+function pickStockForPReturn(stockId){
+  const s = db.stock.find(x=>x.id===stockId);
+  if(!s) return;
+  if(purchaseReturnDraft.items.find(it=>it.stockId===stockId)){ document.getElementById('pReturnSearch').value=''; render(); return; }
+  purchaseReturnDraft.items.push({stockId:s.id, itemName:s.itemName, batch:s.batch, expiry:s.expiry, availableQty:s.qty, qty:s.qty, rate:s.purchaseRate, gst:s.gst, reason:'Expired'});
+  document.getElementById('pReturnSearch').value='';
+  render();
+}
+function removePurchaseReturnItem(idx){ purchaseReturnDraft.items.splice(idx,1); render(); }
+function updatePurchaseReturnItem(idx,field,val){
+  purchaseReturnDraft.items[idx][field] = field==='qty' ? Number(val) : val;
+}
+function savePurchaseReturn(){
+  if(CLOUD_MODE){ savePurchaseReturnCloud(); return; }
+  const valid = purchaseReturnDraft.items.filter(it=>Number(it.qty)>0);
+  if(!valid.length){ alert('Add at least one item to return.'); return; }
+  for(const it of valid){
+    const s = db.stock.find(x=>x.id===it.stockId);
+    if(!s || Number(it.qty) > s.qty){ alert(`Return qty for ${it.itemName} can't exceed current stock (${s?s.qty:0}).`); return; }
+  }
+  let totalAmount=0, totalGst=0;
+  valid.forEach(it=>{
+    const amt = Number(it.qty)*Number(it.rate);
+    const gstAmt = amt*Number(it.gst)/100;
+    totalAmount += amt; totalGst += gstAmt;
+    const s = db.stock.find(x=>x.id===it.stockId);
+    s.qty -= Number(it.qty);
+  });
+  const id = nextId('PRET');
+  db.purchaseReturns.push({id, date:todayStr(), items:valid, totalAmount, totalGst});
+  saveDB(db);
+  purchaseReturnDraft = {items:[]};
+  openPrintPreview('purchaseReturn', id);
+}
+async function savePurchaseReturnCloud(){
+  const valid = purchaseReturnDraft.items.filter(it=>Number(it.qty)>0);
+  if(!valid.length){ alert('Add at least one item to return.'); return; }
+  try{
+    const retRef = fsDB.collection('purchaseReturns').doc();
+    await fsDB.runTransaction(async (tx)=>{
+      const refs = valid.map(it=>fsDB.collection('stock').doc(it.stockId));
+      const snaps = await Promise.all(refs.map(r=>tx.get(r)));
+      let totalAmount=0, totalGst=0;
+      snaps.forEach((snap,i)=>{
+        const it = valid[i];
+        const avail = snap.exists ? (snap.data().qty||0) : 0;
+        if(Number(it.qty) > avail) throw new Error(`Return qty for ${it.itemName} can't exceed current stock (${avail}).`);
+      });
+      snaps.forEach((snap,i)=>{
+        const it = valid[i];
+        tx.update(refs[i], {qty: firebase.firestore.FieldValue.increment(-Number(it.qty))});
+        totalAmount += Number(it.qty)*Number(it.rate);
+        totalGst += Number(it.qty)*Number(it.rate)*Number(it.gst)/100;
+      });
+      tx.set(retRef, {date:todayStr(), items:valid, totalAmount, totalGst, createdAt: firebase.firestore.FieldValue.serverTimestamp()});
+    });
+    purchaseReturnDraft = {items:[]};
+    openPrintPreview('purchaseReturn', retRef.id);
+  }catch(e){
+    console.error(e);
+    alert(e.message);
+  }
+}
+window.renderPReturnSearchResults = renderPReturnSearchResults;
+window.pickStockForPReturn = pickStockForPReturn;
+window.removePurchaseReturnItem = removePurchaseReturnItem;
+window.updatePurchaseReturnItem = updatePurchaseReturnItem;
+window.savePurchaseReturn = savePurchaseReturn;
+
+
+/* ===================== SALES SCREEN ===================== */
+let salesMode = 'new';
+function renderSales(){
+  const modeSwitcher = `
+    <div class="segment">
+      <button class="${salesMode==='new'?'active':''}" onclick="salesMode='new';render()">New sale</button>
+      <button class="${salesMode==='return'?'active':''}" onclick="salesMode='return';render()">Customer return</button>
+    </div>`;
+  if(salesMode==='return') return modeSwitcher + renderSaleReturn();
+
+  const itemsHtml = saleDraft.items.map((it,idx)=>{
+    const amt = Number(it.qty)*Number(it.rate);
+    const discAmt = amt*Number(it.discount)/100;
+    const taxable = amt-discAmt;
+    const gstAmt = taxable*Number(it.gst)/100;
+    return `
+    <div class="item-row-card">
+      <button class="rm" onclick="removeSaleItem(${idx})">×</button>
+      <div class="li-main">${it.itemName} <span style="color:var(--ink-500);font-weight:500;">(${it.batch})</span></div>
+      <div class="row3" style="margin-top:8px;">
+        <div class="field"><label>Sale qty</label><input type="number" value="${it.qty}" onchange="updateSaleItem(${idx},'qty',this.value)"/></div>
+        <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty}" onchange="updateSaleItem(${idx},'freeQty',this.value)"/></div>
+        <div class="field"><label>Discount %</label><input type="number" value="${it.discount}" onchange="updateSaleItem(${idx},'discount',this.value)"/></div>
+      </div>
+      <div style="font-size:12px;color:var(--ink-500);">Rate ${fmt(it.rate)} • GST ${it.gst}% • Line total <b style="color:var(--teal-900);">${fmt(taxable+gstAmt)}</b></div>
+    </div>`;
+  }).join('');
+
+  const totalAmt = saleDraft.items.reduce((a,it)=>a+Number(it.qty)*Number(it.rate),0);
+  const totalDisc = saleDraft.items.reduce((a,it)=>a+(Number(it.qty)*Number(it.rate))*Number(it.discount)/100,0);
+  const totalGst = saleDraft.items.reduce((a,it)=>{
+    const taxable = Number(it.qty)*Number(it.rate) - (Number(it.qty)*Number(it.rate))*Number(it.discount)/100;
+    return a + taxable*Number(it.gst)/100;
+  },0);
+  const grand = totalAmt-totalDisc+totalGst;
+
+  return modeSwitcher + `
+    <div class="card">
+      <h3>Add item to bill</h3>
+      <div class="field"><label>Search stock item</label>
+        <input id="saleSearch" placeholder="Type item name..." oninput="renderSaleSearchResults(this.value)"/>
+      </div>
+      <div id="saleSearchResults"></div>
+    </div>
+
+    <div class="card">
+      <h3>Bill items</h3>
+      ${itemsHtml || `<div class="empty"><div class="e-icon">🧾</div>No items added yet.</div>`}
+    </div>
+
+    ${saleDraft.items.length ? `
+    <div class="card">
+      <h3>Bill summary</h3>
+      <div class="total-line"><span>Subtotal</span><span>${fmt(totalAmt)}</span></div>
+      <div class="total-line"><span>Discount</span><span>-${fmt(totalDisc)}</span></div>
+      <div class="total-line"><span>GST</span><span>${fmt(totalGst)}</span></div>
+      <div class="total-line grand"><span>Grand total</span><span>${fmt(grand)}</span></div>
+    </div>
+    <button class="btn btn-primary" onclick="saveSale()">Save bill</button>
+    ` : ''}
+  `;
+}
+
+function renderSaleSearchResults(q){
+  const box = document.getElementById('saleSearchResults');
+  if(!q || q.trim().length<1){ box.innerHTML=''; return; }
+  const matches = db.stock.filter(s=> s.qty>0 && s.itemName.toLowerCase().includes(q.toLowerCase())).slice(0,6);
+  if(!matches.length){ box.innerHTML = `<div class="empty" style="padding:14px;">No matching stock found.</div>`; return; }
+  box.innerHTML = matches.map(s=>`
+    <div class="list-row" style="cursor:pointer;" onclick="pickStockForSale('${s.id}')">
+      <div><div class="li-main">${s.itemName}</div><div class="li-sub">Batch ${s.batch} • Qty ${s.qty} • Exp ${s.expiry}</div></div>
+      <div class="li-right">${fmt(s.mrp)}</div>
+    </div>
+  `).join('');
+}
+function pickStockForSale(stockId){
+  const s = db.stock.find(x=>x.id===stockId);
+  if(!s) return;
+  saleDraft.items.push({stockId:s.id, itemName:s.itemName, batch:s.batch, qty:1, freeQty:0, discount:0, rate:s.mrp, gst:s.gst});
+  document.getElementById('saleSearch').value='';
+  render();
+}
+function removeSaleItem(idx){ saleDraft.items.splice(idx,1); render(); }
+function updateSaleItem(idx,field,val){
+  saleDraft.items[idx][field] = Number(val);
+  render();
+}
+function saveSale(){
+  if(CLOUD_MODE){ saveSaleCloud(); return; }
+  for(const it of saleDraft.items){
+    const s = db.stock.find(x=>x.id===it.stockId);
+    const needed = Number(it.qty)+Number(it.freeQty);
+    if(!s || s.qty < needed){
+      alert(`Not enough stock for ${it.itemName} (batch ${it.batch}). Available: ${s?s.qty:0}`);
+      return;
+    }
+  }
+  const id = nextId('SAL');
+  let totalAmount=0, totalGst=0, totalDiscount=0;
+  saleDraft.items.forEach(it=>{
+    const amt = Number(it.qty)*Number(it.rate);
+    const disc = amt*Number(it.discount)/100;
+    const gstAmt = (amt-disc)*Number(it.gst)/100;
+    totalAmount += amt-disc; totalGst += gstAmt; totalDiscount += disc;
+    const s = db.stock.find(x=>x.id===it.stockId);
+    s.qty -= (Number(it.qty)+Number(it.freeQty));
+  });
+  db.sales.push({id, date:todayStr(), customer:saleDraft.customer||'Walk-in', items:saleDraft.items, totalAmount:totalAmount+totalGst, totalGst, totalDiscount});
+  saveDB(db);
+  saleDraft = {customer:'', items:[]};
+  openPrintPreview('sale', id);
+}
+
+/* ---- Sale Return (from customer) ---- */
+let saleReturnDraft = { sale:null, items:[] };
+function renderSaleReturn(){
+  if(!saleReturnDraft.sale){
+    return `
+      <div class="card">
+        <h3>Find the bill</h3>
+        <div class="field"><label>Search by bill number</label>
+          <input id="sReturnSearch" placeholder="e.g. SAL-0007" oninput="renderSReturnSearchResults(this.value)"/>
+        </div>
+        <div id="sReturnSearchResults"></div>
+      </div>
+    `;
+  }
+  const sale = saleReturnDraft.sale;
+  const itemsHtml = saleReturnDraft.items.map((it,idx)=>`
+    <div class="item-row-card">
+      <div class="li-main">${it.itemName} <span style="color:var(--ink-500);font-weight:500;">(${it.batch})</span></div>
+      <div class="li-sub">Sold qty on this bill: ${it.soldQty}</div>
+      <div class="row2" style="margin-top:8px;">
+        <div class="field"><label>Return qty</label><input type="number" value="${it.qty}" onchange="updateSaleReturnItem(${idx},'qty',this.value)"/></div>
+        <div class="field"><label>Reason</label>
+          <select onchange="updateSaleReturnItem(${idx},'reason',this.value)">
+            ${['Customer changed mind','Wrong item given','Damaged/defective','Doctor changed prescription','Other'].map(r=>`<option ${it.reason===r?'selected':''}>${r}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    </div>
+  `).join('');
+  const totalValue = saleReturnDraft.items.reduce((a,it)=>a+Number(it.qty)*Number(it.rate),0);
+  const totalGst = saleReturnDraft.items.reduce((a,it)=>a+Number(it.qty)*Number(it.rate)*Number(it.gst)/100,0);
+
+  return `
+    <div class="card">
+      <h3>${sale.id}</h3>
+      <div class="li-sub">${sale.date} • ${sale.customer}</div>
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="saleReturnDraft={sale:null,items:[]};render()">← Choose a different bill</button>
+    </div>
+    <div class="card">
+      <h3>Items on this bill</h3>
+      ${itemsHtml}
+    </div>
+    <div class="card">
+      <h3>Return summary</h3>
+      <div class="total-line"><span>Value</span><span>${fmt(totalValue)}</span></div>
+      <div class="total-line"><span>GST</span><span>${fmt(totalGst)}</span></div>
+      <div class="total-line grand"><span>Total refund</span><span>${fmt(totalValue+totalGst)}</span></div>
+    </div>
+    <button class="btn btn-primary" onclick="saveSaleReturn()">Confirm & save return</button>
+  `;
+}
+function renderSReturnSearchResults(q){
+  const box = document.getElementById('sReturnSearchResults');
+  if(!q || q.trim().length<1){ box.innerHTML=''; return; }
+  const matches = db.sales.filter(s=> s.id.toLowerCase().includes(q.toLowerCase()) || (s.customer||'').toLowerCase().includes(q.toLowerCase())).slice(0,8);
+  if(!matches.length){ box.innerHTML = `<div class="empty" style="padding:14px;">No matching bill found.</div>`; return; }
+  box.innerHTML = matches.map(s=>`
+    <div class="list-row" style="cursor:pointer;" onclick="pickSaleForReturn('${s.id}')">
+      <div><div class="li-main">${s.id}</div><div class="li-sub">${s.date} • ${s.customer}</div></div>
+      <div class="li-right">${fmt(s.totalAmount)}</div>
+    </div>
+  `).join('');
+}
+function pickSaleForReturn(saleId){
+  const sale = db.sales.find(s=>s.id===saleId);
+  if(!sale) return;
+  saleReturnDraft.sale = sale;
+  saleReturnDraft.items = sale.items.map(it=>({
+    stockId:it.stockId, itemName:it.itemName, batch:it.batch, soldQty:it.qty,
+    qty:it.qty, rate:it.rate, gst:it.gst, reason:'Customer changed mind'
+  }));
+  render();
+}
+function updateSaleReturnItem(idx,field,val){
+  saleReturnDraft.items[idx][field] = field==='qty' ? Number(val) : val;
+}
+function saveSaleReturn(){
+  if(CLOUD_MODE){ saveSaleReturnCloud(); return; }
+  const valid = saleReturnDraft.items.filter(it=>Number(it.qty)>0 && Number(it.qty)<=Number(it.soldQty));
+  if(!valid.length){ alert('Set a return quantity (up to the sold quantity) for at least one item.'); return; }
+  let totalAmount=0, totalGst=0;
+  valid.forEach(it=>{
+    const amt = Number(it.qty)*Number(it.rate);
+    const gstAmt = amt*Number(it.gst)/100;
+    totalAmount += amt; totalGst += gstAmt;
+    const s = db.stock.find(x=>x.id===it.stockId);
+    if(s) s.qty += Number(it.qty);
+  });
+  const id = nextId('SRET');
+  db.saleReturns.push({id, date:todayStr(), refSaleId:saleReturnDraft.sale.id, items:valid, totalAmount, totalGst});
+  saveDB(db);
+  saleReturnDraft = {sale:null, items:[]};
+  openPrintPreview('saleReturn', id);
+}
+async function saveSaleReturnCloud(){
+  const valid = saleReturnDraft.items.filter(it=>Number(it.qty)>0 && Number(it.qty)<=Number(it.soldQty));
+  if(!valid.length){ alert('Set a return quantity (up to the sold quantity) for at least one item.'); return; }
+  try{
+    const batchWrite = fsDB.batch();
+    const retRef = fsDB.collection('saleReturns').doc();
+    let totalAmount=0, totalGst=0;
+    valid.forEach(it=>{
+      totalAmount += Number(it.qty)*Number(it.rate);
+      totalGst += Number(it.qty)*Number(it.rate)*Number(it.gst)/100;
+      if(it.stockId){
+        const stockRef = fsDB.collection('stock').doc(it.stockId);
+        batchWrite.set(stockRef, {qty: firebase.firestore.FieldValue.increment(Number(it.qty))}, {merge:true});
+      }
+    });
+    batchWrite.set(retRef, {date:todayStr(), refSaleId:saleReturnDraft.sale.id, items:valid, totalAmount, totalGst, createdAt: firebase.firestore.FieldValue.serverTimestamp()});
+    await batchWrite.commit();
+    saleReturnDraft = {sale:null, items:[]};
+    openPrintPreview('saleReturn', retRef.id);
+  }catch(e){
+    console.error(e);
+    alert(e.message);
+  }
+}
+window.renderSReturnSearchResults = renderSReturnSearchResults;
+window.pickSaleForReturn = pickSaleForReturn;
+window.updateSaleReturnItem = updateSaleReturnItem;
+window.saveSaleReturn = saveSaleReturn;
+
+/* ===================== STOCK SCREEN ===================== */
+let stockFilter = 'all';
+function renderStock(){
+  let rows = db.stock.filter(s=>s.qty>0 || stockFilter==='out');
+  if(stockFilter==='low') rows = rows.filter(s=>s.qty>0 && s.qty<=10);
+  if(stockFilter==='exp') rows = rows.filter(s=>daysUntil(s.expiry)<=90);
+  if(stockFilter==='out') rows = db.stock.filter(s=>s.qty<=0);
+
+  const q = (document.getElementById('stockSearch')?.value || '').toLowerCase();
+  if(q) rows = rows.filter(s=>s.itemName.toLowerCase().includes(q));
+
+  const rowsHtml = rows.map(s=>{
+    const dLeft = daysUntil(s.expiry);
+    let tag = '<span class="tag ok">In stock</span>';
+    if(s.qty<=0) tag = '<span class="tag low">Out of stock</span>';
+    else if(s.qty<=10) tag = '<span class="tag low">Low stock</span>';
+    else if(dLeft<=90) tag = '<span class="tag exp">Expiring soon</span>';
+    return `
+    <div class="list-row">
+      <div><div class="li-main">${s.itemName}</div><div class="li-sub">Batch ${s.batch} • Exp ${s.expiry} • MRP ${fmt(s.mrp)}</div>${tag}</div>
+      <div class="li-right">${s.qty} units</div>
+    </div>`;
+  }).join('');
+
+  return `
+    <div class="search-box"><input id="stockSearch" placeholder="Search item..." oninput="render()"/></div>
+    <div class="segment">
+      <button class="${stockFilter==='all'?'active':''}" onclick="stockFilter='all';render()">All</button>
+      <button class="${stockFilter==='low'?'active':''}" onclick="stockFilter='low';render()">Low</button>
+      <button class="${stockFilter==='exp'?'active':''}" onclick="stockFilter='exp';render()">Expiring</button>
+      <button class="${stockFilter==='out'?'active':''}" onclick="stockFilter='out';render()">Out</button>
+    </div>
+    <div class="card">
+      ${rowsHtml || `<div class="empty"><div class="e-icon">📭</div>No stock items match.</div>`}
+    </div>
+  `;
+}
+
+/* ===================== REPORTS SCREEN ===================== */
+let reportMode = 'daily';
+function renderReports(){
+  const today = todayStr();
+  const month = today.slice(0,7);
+
+  const sales = reportMode==='daily' ? db.sales.filter(s=>s.date===today) : db.sales.filter(s=>s.date.startsWith(month));
+  const purchases = reportMode==='daily' ? db.purchases.filter(p=>p.date===today) : db.purchases.filter(p=>p.date.startsWith(month));
+  const saleReturns = reportMode==='daily' ? db.saleReturns.filter(r=>r.date===today) : db.saleReturns.filter(r=>r.date.startsWith(month));
+  const purchaseReturns = reportMode==='daily' ? db.purchaseReturns.filter(r=>r.date===today) : db.purchaseReturns.filter(r=>r.date.startsWith(month));
+
+  const salesTotal = sales.reduce((a,s)=>a+s.totalAmount,0);
+  const salesGst = sales.reduce((a,s)=>a+s.totalGst,0);
+  const purchaseTotal = purchases.reduce((a,p)=>a+p.totalAmount+p.totalGst,0);
+  const purchaseGst = purchases.reduce((a,p)=>a+p.totalGst,0);
+  const saleReturnTotal = saleReturns.reduce((a,r)=>a+r.totalAmount+r.totalGst,0);
+  const purchaseReturnTotal = purchaseReturns.reduce((a,r)=>a+r.totalAmount+r.totalGst,0);
+  const netSales = salesTotal - saleReturnTotal;
+  const netPurchases = purchaseTotal - purchaseReturnTotal;
+
+  return `
+    <div class="segment">
+      <button class="${reportMode==='daily'?'active':''}" onclick="reportMode='daily';render()">Daily</button>
+      <button class="${reportMode==='monthly'?'active':''}" onclick="reportMode='monthly';render()">Monthly</button>
+    </div>
+    <div class="stat-grid">
+      <div class="stat"><div class="num">${fmt(salesTotal)}</div><div class="lbl">Gross sales</div></div>
+      <div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Gross purchases</div></div>
+      <div class="stat"><div class="num">${fmt(saleReturnTotal)}</div><div class="lbl">Sale returns</div></div>
+      <div class="stat"><div class="num">${fmt(purchaseReturnTotal)}</div><div class="lbl">Purchase returns</div></div>
+      <div class="stat"><div class="num">${fmt(netSales)}</div><div class="lbl">Net sales</div></div>
+      <div class="stat"><div class="num">${fmt(netPurchases)}</div><div class="lbl">Net purchases</div></div>
+      <div class="stat"><div class="num">${fmt(salesGst)}</div><div class="lbl">GST on sales</div></div>
+      <div class="stat"><div class="num">${fmt(purchaseGst)}</div><div class="lbl">GST on purchases</div></div>
+    </div>
+    <div class="card">
+      <h3>${reportMode==='daily'?"Today's":"This month's"} sale bills (${sales.length})</h3>
+      ${sales.length ? sales.map(s=>`
+        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('sale','${s.id}')"><div><div class="li-main">${s.id}</div><div class="li-sub">${s.date} • ${s.customer}</div></div><div class="li-right">${fmt(s.totalAmount)}</div></div>
+      `).join('') : `<div class="empty">No sales recorded.</div>`}
+    </div>
+    <div class="card">
+      <h3>${reportMode==='daily'?"Today's":"This month's"} purchases (${purchases.length})</h3>
+      ${purchases.length ? purchases.map(p=>`
+        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('purchase','${p.id}')"><div><div class="li-main">${p.id}</div><div class="li-sub">${p.date} • ${p.supplier}</div></div><div class="li-right">${fmt(p.totalAmount+p.totalGst)}</div></div>
+      `).join('') : `<div class="empty">No purchases recorded.</div>`}
+    </div>
+    <div class="card">
+      <h3>${reportMode==='daily'?"Today's":"This month's"} sale returns (${saleReturns.length})</h3>
+      ${saleReturns.length ? saleReturns.map(r=>`
+        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('saleReturn','${r.id}')"><div><div class="li-main">${r.id}</div><div class="li-sub">${r.date} • against ${r.refSaleId}</div></div><div class="li-right">${fmt(r.totalAmount+r.totalGst)}</div></div>
+      `).join('') : `<div class="empty">No sale returns recorded.</div>`}
+    </div>
+    <div class="card">
+      <h3>${reportMode==='daily'?"Today's":"This month's"} purchase returns (${purchaseReturns.length})</h3>
+      ${purchaseReturns.length ? purchaseReturns.map(r=>`
+        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('purchaseReturn','${r.id}')"><div><div class="li-main">${r.id}</div><div class="li-sub">${r.date} • ${r.items.length} item(s)</div></div><div class="li-right">${fmt(r.totalAmount+r.totalGst)}</div></div>
+      `).join('') : `<div class="empty">No purchase returns recorded.</div>`}
+    </div>
+    <div class="step" style="margin-top:4px;">Tap any row above to view or reprint that document.</div>
+  `;
+}
+/* ===================== PRINTABLE DOCUMENTS ===================== */
+let printDoc = null; // {type: 'purchaseReturn'|'saleReturn'|'sale'|'purchase', id}
+
+function openPrintPreview(type, id){
+  printDoc = {type, id};
+  currentScreen = 'printPreview';
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('screenTitle').textContent = titles.printPreview[0];
+  document.getElementById('screenNote').textContent = titles.printPreview[1];
+  render();
+}
+function closePrintPreview(back){
+  printDoc = null;
+  setScreen(back || 'reports');
+}
+function printNow(){ window.print(); }
+
+function renderPrintPreview(){
+  if(!printDoc) return `<div class="empty">Nothing to show.</div>`;
+  const { type, id } = printDoc;
+  let record, docTitle, refLine, itemsRows, totalAmount, totalGst, backScreen;
+
+  if(type==='purchaseReturn'){
+    record = db.purchaseReturns.find(r=>r.id===id);
+    docTitle = 'Purchase Return / Debit Note';
+    refLine = `Issued to: distributor (see item batch for supplier reference)`;
+    backScreen = 'stock';
+  } else if(type==='saleReturn'){
+    record = db.saleReturns.find(r=>r.id===id);
+    docTitle = 'Sale Return / Credit Note';
+    refLine = `Against original bill: ${record ? record.refSaleId : ''}`;
+    backScreen = 'stock';
+  } else if(type==='sale'){
+    record = db.sales.find(s=>s.id===id);
+    docTitle = 'Sale Bill';
+    refLine = `Customer: ${record ? record.customer : ''}`;
+    backScreen = 'reports';
+  } else if(type==='purchase'){
+    record = db.purchases.find(p=>p.id===id);
+    docTitle = 'Purchase Bill';
+    refLine = `Supplier: ${record ? record.supplier : ''}`;
+    backScreen = 'reports';
+  }
+
+  if(!record) return `<div class="empty">Document not found.</div><button class="btn btn-ghost no-print" onclick="closePrintPreview('${backScreen||'reports'}')">← Back</button>`;
+
+  const items = record.items || [];
+  totalAmount = record.totalAmount || 0;
+  totalGst = record.totalGst || 0;
+
+  itemsRows = items.map(it=>{
+    const qty = it.qty!=null ? it.qty : '';
+    const rate = it.rate!=null ? it.rate : 0;
+    const gst = it.gst!=null ? it.gst : 0;
+    const amt = (Number(qty)||0)*(Number(rate)||0);
+    return `
+      <tr>
+        <td>${it.itemName||''}${it.batch?` <span style="color:var(--ink-500);">(${it.batch})</span>`:''}${it.reason?`<br><span style="color:var(--ink-500);font-size:10.5px;">${it.reason}</span>`:''}</td>
+        <td class="num">${qty}</td>
+        <td class="num">${fmt(rate)}</td>
+        <td class="num">${gst}%</td>
+        <td class="num">${fmt(amt)}</td>
+      </tr>`;
+  }).join('');
+
+  return `
+    <div id="printArea">
+      <div class="card">
+        <div class="doc-head">
+          <div class="shop">Hussain Drug House</div>
+          <div class="addr">Retail Pharmacy • GSTIN: 18ADOPH1433M1ZB</div>
+          <div class="addr">2ND Gali Kazir Bazar, Ratabari - 788735</div>
+          <div class="doctitle">${docTitle}</div>
+        </div>
+        <div class="doc-meta">
+          <span>Doc no: <b style="color:var(--ink-900);">${record.id}</b></span>
+          <span>Date: <b style="color:var(--ink-900);">${record.date}</b></span>
+        </div>
+        <div class="step" style="margin-bottom:10px;">${refLine}</div>
+        <table class="doc-table">
+          <thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">GST</th><th class="num">Amount</th></tr></thead>
+          <tbody>${itemsRows}</tbody>
+        </table>
+        <div class="total-line"><span>Taxable value</span><span>${fmt(totalAmount)}</span></div>
+        <div class="total-line"><span>GST</span><span>${fmt(totalGst)}</span></div>
+        <div class="total-line grand"><span>Total</span><span>${fmt(totalAmount+totalGst)}</span></div>
+        <div class="step" style="margin-top:14px;text-align:center;">This is a system-generated document from Hussain Drug House.</div>
+      </div>
+    </div>
+    <div class="no-print" style="display:flex;gap:8px;">
+      <button class="btn btn-ghost" onclick="closePrintPreview('${backScreen}')">← Back</button>
+      <button class="btn btn-primary" onclick="printNow()">🖨 Print / Save as PDF</button>
+    </div>
+  `;
+}
+window.openPrintPreview = openPrintPreview;
+window.closePrintPreview = closePrintPreview;
+window.printNow = printNow;
+
+function attachHandlers(){
+  const photoInput = document.getElementById('photoInput');
+  if(photoInput){
+    photoInput.addEventListener('change', (e)=>{
+      const file = e.target.files[0];
+      if(!file) return;
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        compressImage(reader.result, 1600, 0.7).then(compressed=>{
+          purchaseDraft.photo = compressed;
+          render();
+        });
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+}
+
+/* Resize + re-compress a photo before it's stored/uploaded, so a 2-3MB
+   phone photo typically shrinks to well under 300KB while staying readable. */
+function compressImage(dataURL, maxWidth, quality){
+  return new Promise((resolve)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      let w = img.width, h = img.height;
+      if(w > maxWidth){
+        h = Math.round(h * (maxWidth / w));
+        w = maxWidth;
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = ()=> resolve(dataURL); // fall back to original if anything goes wrong
+    img.src = dataURL;
+  });
+}
+
+/* Cloud mode without a Storage bucket (Option B): the bill photo is stored
+   directly inside the Firestore purchase document instead of a separate
+   file bucket. Firestore caps a single document at 1MB total, so this
+   keeps re-compressing (smaller width, lower quality) until the photo
+   comfortably fits, leaving room for the rest of the document's fields. */
+async function ensureFirestoreSafePhoto(dataURL){
+  let current = dataURL;
+  let width = 1600, quality = 0.7;
+  for(let i=0;i<5;i++){
+    const approxBytes = Math.ceil((current.length * 3) / 4);
+    if(approxBytes < 650*1024) return current;
+    width = Math.round(width*0.8);
+    quality = Math.max(0.35, quality-0.15);
+    current = await compressImage(dataURL, width, quality);
+  }
+  return current;
+}
+
+/* expose functions used in inline handlers */
+window.setScreen = setScreen;
+window.addPurchaseItem = addPurchaseItem;
+window.removePurchaseItem = removePurchaseItem;
+window.updatePurchaseItem = updatePurchaseItem;
+window.bumpFree = bumpFree;
+window.savePurchase = savePurchase;
+window.renderSaleSearchResults = renderSaleSearchResults;
+window.pickStockForSale = pickStockForSale;
+window.removeSaleItem = removeSaleItem;
+window.updateSaleItem = updateSaleItem;
+window.saveSale = saveSale;
+window.render = render;
+
+/* One-time repair: older versions of this app could assign the same ID to
+   two different products (a numbering bug). This rebuilds every stock ID
+   from its item name + batch (which can never collide), merges any rows
+   that turn out to be true duplicates, and fixes historical sale/return
+   records to point at the corrected IDs. Safe to run every load. */
+function repairStockIds(){
+  const merged = {};
+  db.stock.forEach(s=>{
+    const newId = slugId(s.itemName, s.batch);
+    if(merged[newId]){
+      merged[newId].qty = (merged[newId].qty||0) + (s.qty||0);
+      merged[newId].purchaseRate = s.purchaseRate;
+      merged[newId].mrp = s.mrp;
+      merged[newId].gst = s.gst;
+      if(s.expiry) merged[newId].expiry = s.expiry;
+    } else {
+      merged[newId] = Object.assign({}, s, {id:newId});
+    }
+  });
+  db.stock = Object.values(merged);
+  const fixRefs = (arr)=>{ (arr||[]).forEach(rec=>{
+    (rec.items||[]).forEach(it=>{ if(it.itemName && it.batch) it.stockId = slugId(it.itemName, it.batch); });
+  }); };
+  fixRefs(db.sales); fixRefs(db.saleReturns); fixRefs(db.purchaseReturns);
+  saveDB(db);
+}
+
+/* ===================== STARTUP ===================== */
+const cloudStarting = initCloudIfConfigured();
+updateCloudBadge();
+
+if(!cloudStarting){
+  /* Local mode: seed a sample item so Stock/Sales aren't empty on first open */
+  if(db.stock.length===0){
+    db.stock.push({id:slugId('Paracetamol 500mg','PB2201'), itemName:'Paracetamol 500mg', batch:'PB2201', expiry:'12/2027', mrp:12, purchaseRate:8.5, gst:12, qty:120});
+    db.stock.push({id:slugId('Amoxicillin 250mg','AX0987'), itemName:'Amoxicillin 250mg', batch:'AX0987', expiry:'03/2026', mrp:45, purchaseRate:32, gst:12, qty:8});
+    saveDB(db);
+  } else {
+    repairStockIds();
+  }
+  render();
+} else {
+  /* Cloud mode: show empty state until the first Firestore snapshot arrives */
+  document.getElementById('main').innerHTML = '<div class="empty" style="padding:60px 10px;"><div class="e-icon">☁</div>Connecting to your Firebase project…</div>';
+}
+</script>
+</body>
+</html>
