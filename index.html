@@ -328,6 +328,7 @@ function getStoredConfig(){
 function openCloudModal(){
   const body = document.getElementById('cloudModalBody');
   const existing = getStoredConfig();
+  document.querySelector('#cloudModal .modal-head h3').textContent = 'Connect cloud sync';
   body.innerHTML = `
     <div class="step">This connects the app to a <b>free Firebase project</b> (Google's cloud database) so stock, sales and purchases sync live across every phone and computer — no monthly fee for a single shop's volume.</div>
     <div class="step">
@@ -490,7 +491,7 @@ async function savePurchaseCloud(){
       const patch = {
         itemName: it.itemName.trim(), batch: it.batch.trim(),
         purchaseRate: Number(it.rate), gst: Number(it.gst),
-        mrp: Number(it.rate)*1.2,
+        mrp: Number(it.mrp)>0 ? Number(it.mrp) : Number(it.rate)*1.2,
         qty: firebase.firestore.FieldValue.increment(Number(it.qty)+Number(it.freeQty))
       };
       if(it.expiry) patch.expiry = it.expiry;
@@ -667,6 +668,15 @@ function renderDashboard(){
         <input type="file" accept="application/json" style="display:none;" onchange="importBackup(this.files[0])"/>
       </label>
     </div>
+    <div class="card">
+      <h3>Bill text reader (OCR)</h3>
+      ${getOcrKey()
+        ? `<div class="step" style="margin-bottom:8px;">Connected — when you attach a bill photo in Purchase, you can read its text and tap lines into item rows.</div>
+           <button class="btn btn-danger" onclick="removeOcrKey();render()">Disconnect OCR</button>`
+        : `<div class="step" style="margin-bottom:8px;">Optional: read text off bill photos so you can tap an item name in instead of retyping it. Numbers still need manual entry and checking.</div>
+           <button class="btn btn-ghost" onclick="openOcrModal()">Connect OCR</button>`
+      }
+    </div>
   `;
 }
 
@@ -690,10 +700,13 @@ function renderPurchase(){
         <div class="field"><label>Batch no.</label><input value="${it.batch}" oninput="updatePurchaseItem(${idx},'batch',this.value)"/></div>
         <div class="field"><label>Expiry (MM/YYYY)</label><input value="${it.expiry}" oninput="updatePurchaseItem(${idx},'expiry',this.value)" placeholder="12/2027"/></div>
       </div>
-      <div class="row3">
+      <div class="row2">
         <div class="field"><label>Purchase qty</label><input type="number" value="${it.qty}" oninput="updatePurchaseItem(${idx},'qty',this.value)"/></div>
         <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty}" oninput="updatePurchaseItem(${idx},'freeQty',this.value)"/></div>
-        <div class="field"><label>Rate/unit</label><input type="number" value="${it.rate}" oninput="updatePurchaseItem(${idx},'rate',this.value)"/></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Rate/unit (your cost)</label><input type="number" value="${it.rate}" oninput="updatePurchaseItem(${idx},'rate',this.value)"/></div>
+        <div class="field"><label>MRP (printed on pack)</label><input type="number" value="${it.mrp}" oninput="updatePurchaseItem(${idx},'mrp',this.value)"/></div>
       </div>
       <div class="field"><label>GST %</label>
         <select class="gst-select" onchange="updatePurchaseItem(${idx},'gst',this.value)">
@@ -716,15 +729,13 @@ function renderPurchase(){
   const totalGst = purchaseDraft.items.reduce((a,it)=>a+((Number(it.qty)||0)*(Number(it.rate)||0))*(Number(it.gst)||0)/100,0);
 
   return modeSwitcher + `
-    <div class="banner-note">Prototype note: photo is stored on this device only (browser storage). A real deployment would upload it to cloud storage so all staff phones can see it.</div>
-
     <div class="card">
       <h3>Bill photo</h3>
       <div class="photo-box">
         ${purchaseDraft.photo ? `<img src="${purchaseDraft.photo}"/>` : `<div style="font-size:28px;">📷</div><div class="hint">Take a photo or upload the supplier's bill</div>`}
         <input type="file" accept="image/*" capture="environment" id="photoInput" style="margin-top:10px;width:100%;"/>
-        <div class="hint">OCR auto-fill isn't wired up in this prototype — add items manually below. In the real app, this photo would attempt to auto-fill the fields, with everything still editable before saving.</div>
       </div>
+      ${purchaseDraft.photo ? renderOcrPanel() : ''}
       <div class="field"><label>Supplier name</label>
         <input value="${purchaseDraft.supplier}" oninput="purchaseDraft.supplier=this.value" placeholder="e.g. Sundeep Distributors"/>
       </div>
@@ -749,7 +760,7 @@ function renderPurchase(){
 }
 
 function addPurchaseItem(){
-  purchaseDraft.items.push({itemName:'',batch:'',expiry:'',qty:0,freeQty:0,rate:0,gst:12,detected:null});
+  purchaseDraft.items.push({itemName:'',batch:'',expiry:'',qty:0,freeQty:0,rate:0,mrp:0,gst:12,detected:null});
   render();
 }
 function removePurchaseItem(idx){ purchaseDraft.items.splice(idx,1); render(); }
@@ -774,12 +785,14 @@ function savePurchase(){
     const gstAmt = amt*Number(it.gst)/100;
     totalAmount += amt; totalGst += gstAmt;
     let stockRow = findStock(it.itemName, it.batch);
+    const typedMrp = Number(it.mrp)>0 ? Number(it.mrp) : Number(it.rate)*1.2;
     if(!stockRow){
-      stockRow = {id: slugId(it.itemName, it.batch), itemName:it.itemName.trim(), batch:it.batch.trim(), expiry:it.expiry, mrp:Number(it.rate)*1.2, purchaseRate:Number(it.rate), gst:Number(it.gst), qty:0};
+      stockRow = {id: slugId(it.itemName, it.batch), itemName:it.itemName.trim(), batch:it.batch.trim(), expiry:it.expiry, mrp:typedMrp, purchaseRate:Number(it.rate), gst:Number(it.gst), qty:0};
       db.stock.push(stockRow);
     }
     stockRow.qty += Number(it.qty)+Number(it.freeQty);
     stockRow.purchaseRate = Number(it.rate);
+    stockRow.mrp = typedMrp;
     if(it.expiry) stockRow.expiry = it.expiry;
   });
   db.purchases.push({id, date:todayStr(), supplier:purchaseDraft.supplier||'Unknown supplier', photo:purchaseDraft.photo, items:valid, totalAmount, totalGst});
@@ -1410,6 +1423,212 @@ async function ensureFirestoreSafePhoto(dataURL){
   }
   return current;
 }
+
+/* ===================== OCR (Google Cloud Vision, optional) =====================
+   Reads text off a bill photo so you don't have to re-read tiny print off
+   the physical bill while typing. It does NOT auto-fill quantities, rates,
+   batches or GST — those still need real judgement and stay manual, same as
+   discussed. What it saves you is retyping item names: tap a detected line
+   to drop it straight into a new item row as a starting point. */
+const OCR_KEY_STORAGE = 'hdh_ocr_key';
+let ocrLines = [];
+let ocrBusy = false;
+
+function getOcrKey(){ return localStorage.getItem(OCR_KEY_STORAGE) || ''; }
+
+function openOcrModal(){
+  const body = document.getElementById('cloudModalBody');
+  const existing = getOcrKey();
+  document.querySelector('#cloudModal .modal-head h3').textContent = 'Connect bill text reader (OCR)';
+  body.innerHTML = `
+    <div class="step">This uses <b>Google Cloud Vision</b> to read the text off a bill photo, so you can tap a line instead of retyping it. It does not fill in quantities, rates or GST — those still need a human check, same as before.</div>
+    <div class="step">
+      <b>One-time setup:</b><br>
+      1. Go to <b>console.cloud.google.com</b> → select your <b>hussain-drug-house</b> project (same one as Firebase).<br>
+      2. Search "Billing" → link a billing account (needs a card, but you get <b>1,000 free images every month</b> — at ~130 bills/month you'll realistically never be charged).<br>
+      3. Search "Cloud Vision API" → tap <b>Enable</b>.<br>
+      4. Search "Credentials" → <b>Create credentials → API key</b> → copy the key shown.<br>
+      5. Paste it below.
+    </div>
+    <div class="field"><label>Paste API key here</label>
+      <input class="config-input" id="ocrKeyInput" style="min-height:auto;font-family:inherit;" placeholder="AIzaSy..." value="${existing}"/>
+    </div>
+    <button class="btn btn-primary" onclick="saveOcrKey()">Connect</button>
+    ${existing ? `<button class="btn btn-danger" style="margin-top:8px;" onclick="removeOcrKey()">Disconnect OCR</button>` : ''}
+  `;
+  document.getElementById('cloudModal').style.display='flex';
+}
+function saveOcrKey(){
+  const val = document.getElementById('ocrKeyInput').value.trim();
+  if(!val){ alert('Paste your API key first.'); return; }
+  localStorage.setItem(OCR_KEY_STORAGE, val);
+  closeCloudModal();
+  render();
+}
+function removeOcrKey(){
+  localStorage.removeItem(OCR_KEY_STORAGE);
+  closeCloudModal();
+  render();
+}
+
+function renderOcrPanel(){
+  const key = getOcrKey();
+  if(!key){
+    return `<div class="step" style="margin:10px 0;">Want to auto-read the text off this photo instead of re-reading the small print? <span style="color:var(--teal-700);font-weight:700;cursor:pointer;" onclick="openOcrModal()">Connect OCR (optional)</span></div>`;
+  }
+  let html = `<div style="margin:10px 0;display:flex;gap:8px;flex-wrap:wrap;">
+    <button class="btn btn-ghost btn-sm" ${ocrBusy?'disabled':''} onclick="extractTextFromPhoto()">${ocrBusy ? 'Reading…' : '🔎 Read text (tap lines)'}</button>
+    <button class="btn btn-primary btn-sm" ${ocrBusy?'disabled':''} onclick="extractTableFromPhoto()">${ocrBusy ? 'Reading…' : '📋 Auto-fill rows (beta)'}</button>
+  </div>
+  <div class="step" style="margin-bottom:6px;">"Auto-fill rows" tries to read Description, Qty+Free, Expiry, MRP and Rate straight from the bill's layout — tuned for your regular supplier's format. Batch number is always left blank since it's too easy to misread wrong. <b>Every auto-filled row is a guess — check each one against the physical bill before saving.</b></div>`;
+  if(ocrLines.length){
+    html += `<div class="step" style="margin-bottom:6px;"><b>Tap a line to add it as a new item row:</b></div>`;
+    html += ocrLines.map((line,i)=>`
+      <div class="list-row" style="cursor:pointer;" onclick="addOcrLineAsItem(${i})">
+        <div class="li-main" style="font-weight:500;">${line}</div>
+        <div class="li-right" style="color:var(--teal-700);">+ Add</div>
+      </div>
+    `).join('');
+  }
+  return html;
+}
+
+async function extractTextFromPhoto(){
+  const key = getOcrKey();
+  if(!key || !purchaseDraft.photo) return;
+  ocrBusy = true; render();
+  try{
+    const base64 = purchaseDraft.photo.split(',')[1];
+    const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${key}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ requests:[{ image:{content:base64}, features:[{type:'TEXT_DETECTION'}] }] })
+    });
+    const data = await resp.json();
+    if(data.error){ throw new Error(data.error.message || 'Vision API error'); }
+    const text = data.responses && data.responses[0] && data.responses[0].fullTextAnnotation
+      ? data.responses[0].fullTextAnnotation.text : '';
+    ocrLines = text.split('\n').map(l=>l.trim()).filter(l=>l.length>1);
+    if(!ocrLines.length) alert('No readable text found in this photo — try a clearer, well-lit shot.');
+  }catch(e){
+    console.error(e);
+    alert('Could not read the photo: '+e.message+'\n\nCheck that Cloud Vision API is enabled and billing is linked for your project.');
+  }
+  ocrBusy = false; render();
+}
+
+/* Beta: reconstructs table rows using each word's position on the photo
+   (not just plain flat text), so columns like Qty+Free, Expiry, MRP and
+   Rate can be told apart. Tuned for a MARG ERP-style purchase bill layout.
+   Anything not confidently matched is left blank on purpose. */
+async function extractTableFromPhoto(){
+  const key = getOcrKey();
+  if(!key || !purchaseDraft.photo) return;
+  ocrBusy = true; render();
+  try{
+    const base64 = purchaseDraft.photo.split(',')[1];
+    const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${key}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ requests:[{ image:{content:base64}, features:[{type:'DOCUMENT_TEXT_DETECTION'}] }] })
+    });
+    const data = await resp.json();
+    if(data.error){ throw new Error(data.error.message || 'Vision API error'); }
+    const fta = data.responses && data.responses[0] && data.responses[0].fullTextAnnotation;
+    if(!fta || !fta.pages){ alert('No readable text found — try a clearer, well-lit, flatter photo.'); ocrBusy=false; render(); return; }
+
+    // Flatten every word with its center position on the photo.
+    const words = [];
+    fta.pages.forEach(page=>{
+      (page.blocks||[]).forEach(block=>{
+        (block.paragraphs||[]).forEach(para=>{
+          (para.words||[]).forEach(word=>{
+            const text = (word.symbols||[]).map(s=>s.text).join('');
+            const verts = (word.boundingBox && word.boundingBox.vertices) || [];
+            if(!verts.length || !text) return;
+            const xs = verts.map(v=>v.x||0), ys = verts.map(v=>v.y||0);
+            const cx = xs.reduce((a,b)=>a+b,0)/xs.length;
+            const cy = ys.reduce((a,b)=>a+b,0)/ys.length;
+            const h = Math.max(...ys)-Math.min(...ys);
+            words.push({text, cx, cy, h});
+          });
+        });
+      });
+    });
+    if(!words.length){ alert('No readable text found.'); ocrBusy=false; render(); return; }
+
+    // Cluster words into rows by vertical proximity.
+    const avgH = words.reduce((a,w)=>a+(w.h||10),0)/words.length;
+    const rowGap = Math.max(10, avgH*0.7);
+    words.sort((a,b)=>a.cy-b.cy);
+    const rows = [];
+    words.forEach(w=>{
+      let row = rows.find(r=>Math.abs(r.y-w.cy) < rowGap);
+      if(!row){ row = {y:w.cy, words:[]}; rows.push(row); }
+      row.words.push(w);
+      row.y = row.words.reduce((a,x)=>a+x.cy,0)/row.words.length;
+    });
+    rows.forEach(r=>r.words.sort((a,b)=>a.cx-b.cx));
+    const rowTexts = rows.map(r=>r.words.map(w=>w.text).join(' '));
+
+    const parsed = [];
+    rowTexts.forEach(rowText=>{
+      const qtyFreeMatch = rowText.match(/(\d{1,4})\s*\+\s*(\d{1,3})/);
+      const expiryMatch = rowText.match(/\b(\d{1,2})\/(\d{2,4})\b/);
+      const decimals = (rowText.match(/\d+\.\d{2}\b/g) || []);
+      const descMatch = rowText.match(/^([A-Za-z][A-Za-z\-\s]{2,40}?)(?=\s+\d)/);
+      // Only treat this as a product row if it has an item-name-looking start
+      // AND at least a qty+free pattern or two decimal numbers (MRP, Rate).
+      if(!descMatch) return;
+      if(!qtyFreeMatch && decimals.length<2) return;
+      const description = descMatch[1].trim();
+      if(description.length<3) return;
+      let expiry = '';
+      if(expiryMatch){
+        const mm = expiryMatch[1].padStart(2,'0');
+        let yy = expiryMatch[2];
+        if(yy.length===2) yy = '20'+yy;
+        expiry = mm+'/'+yy;
+      }
+      parsed.push({
+        itemName: description,
+        batch: '',
+        expiry: expiry,
+        qty: qtyFreeMatch ? Number(qtyFreeMatch[1]) : 0,
+        freeQty: qtyFreeMatch ? Number(qtyFreeMatch[2]) : 0,
+        mrp: decimals.length>=2 ? Number(decimals[decimals.length-2]) : 0,
+        rate: decimals.length>=1 ? Number(decimals[decimals.length-1]) : 0,
+        gst: 12,
+        detected: 'auto-parsed — verify against the bill',
+        guessed: true
+      });
+    });
+
+    if(!parsed.length){
+      alert('Couldn\'t confidently detect item rows in this photo. Try "Read text (tap lines)" instead, or add items manually.');
+    } else {
+      parsed.forEach(p=> purchaseDraft.items.push(p));
+    }
+  }catch(e){
+    console.error(e);
+    alert('Could not read the bill table: '+e.message+'\n\nCheck that Cloud Vision API is enabled and billing is linked for your project.');
+  }
+  ocrBusy = false; render();
+}
+
+function addOcrLineAsItem(i){
+  const line = ocrLines[i];
+  if(!line) return;
+  purchaseDraft.items.push({itemName:line, batch:'', expiry:'', qty:0, freeQty:0, rate:0, mrp:0, gst:12, detected:'from photo text'});
+  render();
+}
+window.extractTableFromPhoto = extractTableFromPhoto;
+
+window.openOcrModal = openOcrModal;
+window.saveOcrKey = saveOcrKey;
+window.removeOcrKey = removeOcrKey;
+window.extractTextFromPhoto = extractTextFromPhoto;
+window.addOcrLineAsItem = addOcrLineAsItem;
 
 /* expose functions used in inline handlers */
 window.setScreen = setScreen;
