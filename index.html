@@ -256,6 +256,19 @@
     </div>
   </div>
 
+  <div id="itemPickerModal" class="modal-overlay" style="display:none;">
+    <div class="modal-box" style="max-height:88vh;">
+      <div class="modal-head">
+        <h3 style="margin:0;font-size:15px;">Add items</h3>
+        <button class="modal-close" onclick="closeItemPicker()">×</button>
+      </div>
+      <div class="field"><label>Search products</label>
+        <input id="itemPickerSearch" placeholder="Type product name..." oninput="renderItemPickerList(this.value)"/>
+      </div>
+      <div id="itemPickerList"></div>
+    </div>
+  </div>
+
   <nav class="bottom">
     <button class="nav-btn active" data-screen="dashboard">
       <div class="nav-icon">⌂</div><div class="nav-lbl">Home</div>
@@ -282,17 +295,43 @@ const DB_KEY = 'hdh_pharmacy_db_v1';
 function loadDB(){
   const raw = localStorage.getItem(DB_KEY);
   if(raw){ try{ return JSON.parse(raw); }catch(e){} }
-  return { stock:[], purchases:[], sales:[], purchaseReturns:[], saleReturns:[], seqs:{} };
+  return { stock:[], purchases:[], sales:[], purchaseReturns:[], saleReturns:[], parties:[], payments:[], seqs:{} };
 }
 function saveDB(db){ localStorage.setItem(DB_KEY, JSON.stringify(db)); }
 let db = loadDB();
 if(!db.seqs) db.seqs = {}; // upgrade older saved data that used a single shared 'seq'
+if(!db.parties) db.parties = [];
+if(!db.payments) db.payments = [];
 
 function nextId(prefix){
   if(!db.seqs[prefix]) db.seqs[prefix] = 1;
   const id = prefix + '-' + String(db.seqs[prefix]).padStart(4,'0');
   db.seqs[prefix] += 1;
   return id;
+}
+function formatBillNo(n){ return 'HDH-' + String(n).padStart(5,'0'); }
+/* One shared sequence across purchases, sales and returns — HDH-00001, HDH-00002...
+   Local mode: reuses the same per-prefix counter as everything else, just under
+   one shared 'HDH' key. Cloud mode: allocated inside a small Firestore
+   transaction so two devices can never get the same number at the same time. */
+function nextBillNoLocal(){
+  if(!db.seqs['HDH']) db.seqs['HDH'] = 1;
+  const n = db.seqs['HDH'];
+  db.seqs['HDH'] += 1;
+  return formatBillNo(n);
+}
+async function nextBillNoCloud(){
+  const counterRef = fsDB.collection('meta').doc('billCounter');
+  return await fsDB.runTransaction(async (tx)=>{
+    const snap = await tx.get(counterRef);
+    const current = snap.exists ? (snap.data().seq||0) : 0;
+    const next = current+1;
+    tx.set(counterRef, {seq: next}, {merge:true});
+    return formatBillNo(next);
+  });
+}
+async function nextBillNo(){
+  return CLOUD_MODE ? await nextBillNoCloud() : nextBillNoLocal();
 }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function fmt(n){ return '₹' + (Math.round(n*100)/100).toLocaleString('en-IN'); }
@@ -455,6 +494,14 @@ function attachCloudListeners(){
     db.saleReturns = snap.docs.map(d=>({id:d.id, ...d.data()}));
     render();
   }, err=>console.error('saleReturns listener', err));
+  fsDB.collection('parties').onSnapshot(snap=>{
+    db.parties = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    render();
+  }, err=>console.error('parties listener', err));
+  fsDB.collection('payments').orderBy('createdAt','desc').limit(300).onSnapshot(snap=>{
+    db.payments = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    render();
+  }, err=>console.error('payments listener', err));
 }
 
 function updateCloudBadge(){
@@ -481,6 +528,7 @@ async function savePurchaseCloud(){
     if(purchaseDraft.photo){
       photoData = await ensureFirestoreSafePhoto(purchaseDraft.photo);
     }
+    const billNo = await nextBillNoCloud();
     const batchWrite = fsDB.batch();
     let totalAmount=0, totalGst=0;
     valid.forEach(it=>{
@@ -498,13 +546,16 @@ async function savePurchaseCloud(){
       batchWrite.set(stockRef, patch, {merge:true});
     });
     const purchaseRef = fsDB.collection('purchases').doc();
+    const fullTotal = totalAmount+totalGst;
+    const amountPaid = purchaseDraft.partyId ? (purchaseDraft.paidInFull!==false ? fullTotal : Number(purchaseDraft.amountPaid)||0) : fullTotal;
     batchWrite.set(purchaseRef, {
-      date: todayStr(), supplier: purchaseDraft.supplier||'Unknown supplier',
+      date: todayStr(), billNo, supplier: purchaseDraft.supplier||'Unknown supplier',
       photo: photoData, items: valid, totalAmount, totalGst,
+      partyId: purchaseDraft.partyId||null, amountPaid,
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     await batchWrite.commit();
-    purchaseDraft = {photo:null, supplier:'', items:[]};
+    purchaseDraft = {photo:null, supplier:'', items:[], partyId:null, paidInFull:true, amountPaid:0};
     openPrintPreview('purchase', purchaseRef.id);
   }catch(e){
     console.error(e);
@@ -516,6 +567,7 @@ async function saveSaleCloud(){
   if(!saleDraft.items.length){ alert('Add at least one item to the bill.'); return; }
   const saleRefHolder = {ref:null};
   try{
+    const billNo = await nextBillNoCloud();
     await fsDB.runTransaction(async (tx)=>{
       const refs = saleDraft.items.map(it=>fsDB.collection('stock').doc(it.stockId));
       const snaps = await Promise.all(refs.map(r=>tx.get(r)));
@@ -525,25 +577,30 @@ async function saveSaleCloud(){
         const avail = snap.exists ? (snap.data().qty||0) : 0;
         if(avail < needed) throw new Error(`Not enough stock for ${it.itemName} (batch ${it.batch}). Available: ${avail}`);
       });
-      let totalAmount=0, totalGst=0, totalDiscount=0;
+      let totalNet=0, totalGst=0, totalDiscount=0;
       snaps.forEach((snap,i)=>{
         const it = saleDraft.items[i];
         const needed = Number(it.qty)+Number(it.freeQty);
         tx.update(refs[i], {qty: firebase.firestore.FieldValue.increment(-needed)});
-        const amt = Number(it.qty)*Number(it.rate);
-        const disc = amt*Number(it.discount)/100;
-        const gstAmt = (amt-disc)*Number(it.gst)/100;
-        totalAmount += amt-disc; totalGst += gstAmt; totalDiscount += disc;
+        const gross = Number(it.qty)*Number(it.rate);
+        const disc = gross*Number(it.discount)/100;
+        const net = gross-disc; // MRP already includes GST — this is what the customer pays
+        const taxable = net/(1+Number(it.gst)/100);
+        const gstAmt = net-taxable;
+        totalNet += net; totalGst += gstAmt; totalDiscount += disc;
       });
       const saleRef = fsDB.collection('sales').doc();
       saleRefHolder.ref = saleRef;
+      const fullSaleTotal = totalNet;
+      const saleAmountPaid = saleDraft.partyId ? (saleDraft.paidInFull!==false ? fullSaleTotal : Number(saleDraft.amountPaid)||0) : fullSaleTotal;
       tx.set(saleRef, {
-        date: todayStr(), customer: saleDraft.customer||'Walk-in', items: saleDraft.items,
-        totalAmount: totalAmount+totalGst, totalGst, totalDiscount,
+        date: todayStr(), billNo, customer: saleDraft.customer||'Walk-in', items: saleDraft.items,
+        totalAmount: fullSaleTotal, totalGst, totalDiscount,
+        partyId: saleDraft.partyId||null, amountPaid: saleAmountPaid,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
     });
-    saleDraft = {customer:'', items:[]};
+    saleDraft = {customer:'', items:[], partyId:null, paidInFull:true, amountPaid:0};
     openPrintPreview('sale', saleRefHolder.ref.id);
     return;
   }catch(e){
@@ -584,8 +641,8 @@ window.importBackup = importBackup;
 
 /* ===================== APP STATE / ROUTER ===================== */
 let currentScreen = 'dashboard';
-let purchaseDraft = { photo:null, supplier:'', items:[] };
-let saleDraft = { customer:'', items:[] };
+let purchaseDraft = { photo:null, supplier:'', items:[], partyId:null, paidInFull:true, amountPaid:0 };
+let saleDraft = { customer:'', items:[], partyId:null, paidInFull:true, amountPaid:0 };
 
 const titles = {
   dashboard:['Dashboard','Today\'s summary at a glance'],
@@ -593,7 +650,9 @@ const titles = {
   sales:['New sale','Bill items with discount & free qty'],
   stock:['Full stock','Live inventory, batch-wise'],
   reports:['Reports','Daily & monthly summary'],
-  printPreview:['Document','Preview & print']
+  printPreview:['Document','Preview & print'],
+  parties:['Parties','Suppliers & customers — who you owe, who owes you'],
+  partyDetail:['Party ledger','Transaction history & balance']
 };
 
 function setScreen(name){
@@ -612,6 +671,8 @@ document.querySelectorAll('.nav-btn').forEach(b=>{
 function render(){
   const main = document.getElementById('main');
   if(currentScreen==='printPreview'){ main.innerHTML = renderPrintPreview(); attachHandlers(); return; }
+  if(currentScreen==='parties'){ main.innerHTML = renderPartiesList(); attachHandlers(); return; }
+  if(currentScreen==='partyDetail'){ main.innerHTML = renderPartyDetail(); attachHandlers(); return; }
   if(currentScreen==='dashboard') main.innerHTML = renderDashboard();
   else if(currentScreen==='purchase') main.innerHTML = renderPurchase();
   else if(currentScreen==='sales') main.innerHTML = renderSales();
@@ -639,6 +700,12 @@ function renderDashboard(){
 
   return `
     <div class="stat-grid">
+      <div class="stat" style="cursor:pointer;" onclick="openParties()"><div class="num" style="color:var(--red-700);">${fmt(totalToPay())}</div><div class="lbl">To Pay (suppliers)</div></div>
+      <div class="stat" style="cursor:pointer;" onclick="openParties()"><div class="num" style="color:var(--teal-700);">${fmt(totalToCollect())}</div><div class="lbl">To Collect (customers)</div></div>
+      <div class="stat"><div class="num">${fmt(stockValue())}</div><div class="lbl">Stock value</div></div>
+      <div class="stat"><div class="num">${fmt(thisWeekSales())}</div><div class="lbl">This week's sale</div></div>
+    </div>
+    <div class="stat-grid" style="margin-top:10px;">
       <div class="stat"><div class="num">${fmt(salesTotal)}</div><div class="lbl">Sales today</div></div>
       <div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Purchases today</div></div>
       <div class="stat"><div class="num">${todaySales.length}</div><div class="lbl">Bills today</div></div>
@@ -651,6 +718,7 @@ function renderDashboard(){
     <div class="card">
       <h3>Quick actions</h3>
       <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost" onclick="openParties()">👥 Parties</button>
         <button class="btn btn-primary" onclick="setScreen('purchase')">+ Purchase</button>
         <button class="btn btn-ghost" onclick="setScreen('sales')">+ Sale</button>
       </div>
@@ -705,8 +773,8 @@ function renderPurchase(){
         <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty}" oninput="updatePurchaseItem(${idx},'freeQty',this.value)"/></div>
       </div>
       <div class="row2">
-        <div class="field"><label>Rate/unit (your cost)</label><input type="number" value="${it.rate}" oninput="updatePurchaseItem(${idx},'rate',this.value)"/></div>
-        <div class="field"><label>MRP (printed on pack)</label><input type="number" value="${it.mrp}" oninput="updatePurchaseItem(${idx},'mrp',this.value)"/></div>
+        <div class="field"><label>Rate/unit (your cost)</label><input type="number" value="${it.rate||''}" placeholder="0" oninput="updatePurchaseItem(${idx},'rate',this.value)"/></div>
+        <div class="field"><label>MRP (printed on pack)</label><input type="number" value="${it.mrp||''}" placeholder="0" oninput="updatePurchaseItem(${idx},'mrp',this.value)"/></div>
       </div>
       <div class="field"><label>GST %</label>
         <select class="gst-select" onchange="updatePurchaseItem(${idx},'gst',this.value)">
@@ -739,12 +807,31 @@ function renderPurchase(){
       <div class="field"><label>Supplier name</label>
         <input value="${purchaseDraft.supplier}" oninput="purchaseDraft.supplier=this.value" placeholder="e.g. Sundeep Distributors"/>
       </div>
+      <div class="field"><label>Link to a supplier ledger (optional)</label>
+        <select onchange="purchaseDraft.partyId=this.value||null; if(this.value){const p=db.parties.find(x=>x.id===this.value); if(p) purchaseDraft.supplier=p.name;} render();">
+          <option value="">Don't track on a ledger</option>
+          ${db.parties.filter(p=>p.type==='supplier').map(p=>`<option value="${p.id}" ${purchaseDraft.partyId===p.id?'selected':''}>${p.name}</option>`).join('')}
+        </select>
+      </div>
+      ${purchaseDraft.partyId ? `
+      <div class="row2">
+        <div class="field"><label>Paid in full?</label>
+          <select onchange="purchaseDraft.paidInFull=(this.value==='yes'); render();">
+            <option value="yes" ${purchaseDraft.paidInFull!==false?'selected':''}>Yes, paid in full</option>
+            <option value="no" ${purchaseDraft.paidInFull===false?'selected':''}>No, on credit / partial</option>
+          </select>
+        </div>
+        ${purchaseDraft.paidInFull===false ? `<div class="field"><label>Amount paid now</label><input type="number" value="${purchaseDraft.amountPaid||0}" oninput="purchaseDraft.amountPaid=Number(this.value)"/></div>` : ''}
+      </div>` : ''}
     </div>
 
     <div class="card">
       <h3>Items on this bill</h3>
       ${itemsHtml || `<div class="empty"><div class="e-icon">📦</div>No items added yet.</div>`}
-      <button class="btn btn-ghost" onclick="addPurchaseItem()">+ Add item row</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" style="flex:1;" onclick="openItemPicker('purchase')">📋 Add items</button>
+        <button class="btn btn-ghost" style="flex:1;" onclick="addPurchaseItem()">+ Blank row</button>
+      </div>
     </div>
 
     ${purchaseDraft.items.length ? `
@@ -760,7 +847,7 @@ function renderPurchase(){
 }
 
 function addPurchaseItem(){
-  purchaseDraft.items.push({itemName:'',batch:'',expiry:'',qty:0,freeQty:0,rate:0,mrp:0,gst:12,detected:null});
+  purchaseDraft.items.push({itemName:'',batch:'',expiry:'',qty:0,freeQty:0,rate:0,mrp:0,gst:5,detected:null});
   render();
 }
 function removePurchaseItem(idx){ purchaseDraft.items.splice(idx,1); render(); }
@@ -779,6 +866,7 @@ function savePurchase(){
   const valid = purchaseDraft.items.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
   if(!valid.length){ alert('Add at least one item with name, batch and quantity before saving.'); return; }
   const id = nextId('PUR');
+  const billNo = nextBillNoLocal();
   let totalAmount=0, totalGst=0;
   valid.forEach(it=>{
     const amt = Number(it.qty)*Number(it.rate);
@@ -795,9 +883,11 @@ function savePurchase(){
     stockRow.mrp = typedMrp;
     if(it.expiry) stockRow.expiry = it.expiry;
   });
-  db.purchases.push({id, date:todayStr(), supplier:purchaseDraft.supplier||'Unknown supplier', photo:purchaseDraft.photo, items:valid, totalAmount, totalGst});
+  const fullTotal = totalAmount+totalGst;
+  const amountPaid = purchaseDraft.partyId ? (purchaseDraft.paidInFull!==false ? fullTotal : Number(purchaseDraft.amountPaid)||0) : fullTotal;
+  db.purchases.push({id, billNo, date:todayStr(), supplier:purchaseDraft.supplier||'Unknown supplier', photo:purchaseDraft.photo, items:valid, totalAmount, totalGst, partyId:purchaseDraft.partyId||null, amountPaid});
   saveDB(db);
-  purchaseDraft = {photo:null, supplier:'', items:[]};
+  purchaseDraft = {photo:null, supplier:'', items:[], partyId:null, paidInFull:true, amountPaid:0};
   openPrintPreview('purchase', id);
 }
 
@@ -890,7 +980,8 @@ function savePurchaseReturn(){
     s.qty -= Number(it.qty);
   });
   const id = nextId('PRET');
-  db.purchaseReturns.push({id, date:todayStr(), items:valid, totalAmount, totalGst});
+  const billNo = nextBillNoLocal();
+  db.purchaseReturns.push({id, billNo, date:todayStr(), items:valid, totalAmount, totalGst});
   saveDB(db);
   purchaseReturnDraft = {items:[]};
   openPrintPreview('purchaseReturn', id);
@@ -900,6 +991,7 @@ async function savePurchaseReturnCloud(){
   if(!valid.length){ alert('Add at least one item to return.'); return; }
   try{
     const retRef = fsDB.collection('purchaseReturns').doc();
+    const billNo = await nextBillNoCloud();
     await fsDB.runTransaction(async (tx)=>{
       const refs = valid.map(it=>fsDB.collection('stock').doc(it.stockId));
       const snaps = await Promise.all(refs.map(r=>tx.get(r)));
@@ -915,7 +1007,7 @@ async function savePurchaseReturnCloud(){
         totalAmount += Number(it.qty)*Number(it.rate);
         totalGst += Number(it.qty)*Number(it.rate)*Number(it.gst)/100;
       });
-      tx.set(retRef, {date:todayStr(), items:valid, totalAmount, totalGst, createdAt: firebase.firestore.FieldValue.serverTimestamp()});
+      tx.set(retRef, {date:todayStr(), billNo, items:valid, totalAmount, totalGst, createdAt: firebase.firestore.FieldValue.serverTimestamp()});
     });
     purchaseReturnDraft = {items:[]};
     openPrintPreview('purchaseReturn', retRef.id);
@@ -942,10 +1034,11 @@ function renderSales(){
   if(salesMode==='return') return modeSwitcher + renderSaleReturn();
 
   const itemsHtml = saleDraft.items.map((it,idx)=>{
-    const amt = Number(it.qty)*Number(it.rate);
-    const discAmt = amt*Number(it.discount)/100;
-    const taxable = amt-discAmt;
-    const gstAmt = taxable*Number(it.gst)/100;
+    const gross = Number(it.qty)*Number(it.rate);
+    const discAmt = gross*Number(it.discount)/100;
+    const net = gross-discAmt;                     // what the customer pays — MRP already includes GST
+    const taxable = net/(1+Number(it.gst)/100);
+    const gstAmt = net-taxable;
     return `
     <div class="item-row-card">
       <button class="rm" onclick="removeSaleItem(${idx})">×</button>
@@ -953,25 +1046,30 @@ function renderSales(){
       <div class="row3" style="margin-top:8px;">
         <div class="field"><label>Sale qty</label><input type="number" value="${it.qty}" onchange="updateSaleItem(${idx},'qty',this.value)"/></div>
         <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty}" onchange="updateSaleItem(${idx},'freeQty',this.value)"/></div>
-        <div class="field"><label>Discount %</label><input type="number" value="${it.discount}" onchange="updateSaleItem(${idx},'discount',this.value)"/></div>
+        <div class="field"><label>Discount %</label><input type="number" value="${it.discount||''}" placeholder="0" onchange="updateSaleItem(${idx},'discount',this.value)"/></div>
       </div>
-      <div style="font-size:12px;color:var(--ink-500);">Rate ${fmt(it.rate)} • GST ${it.gst}% • Line total <b style="color:var(--teal-900);">${fmt(taxable+gstAmt)}</b></div>
+      <div style="font-size:12px;color:var(--ink-500);">Rate (MRP, incl. GST) ${fmt(it.rate)} • GST ${it.gst}% (₹${gstAmt.toFixed(2)} incl.) • Line total <b style="color:var(--teal-900);">${fmt(net)}</b></div>
     </div>`;
   }).join('');
 
-  const totalAmt = saleDraft.items.reduce((a,it)=>a+Number(it.qty)*Number(it.rate),0);
+  const totalGross = saleDraft.items.reduce((a,it)=>a+Number(it.qty)*Number(it.rate),0);
   const totalDisc = saleDraft.items.reduce((a,it)=>a+(Number(it.qty)*Number(it.rate))*Number(it.discount)/100,0);
+  const totalNet = totalGross-totalDisc; // customer pays this — GST is inside it, not added on top
   const totalGst = saleDraft.items.reduce((a,it)=>{
-    const taxable = Number(it.qty)*Number(it.rate) - (Number(it.qty)*Number(it.rate))*Number(it.discount)/100;
-    return a + taxable*Number(it.gst)/100;
+    const gross = Number(it.qty)*Number(it.rate);
+    const disc = gross*Number(it.discount)/100;
+    const net = gross-disc;
+    const taxable = net/(1+Number(it.gst)/100);
+    return a + (net-taxable);
   },0);
-  const grand = totalAmt-totalDisc+totalGst;
+  const totalAmt = totalGross;
+  const grand = totalNet;
 
   return modeSwitcher + `
     <div class="card">
       <h3>Add item to bill</h3>
-      <div class="field"><label>Search stock item</label>
-        <input id="saleSearch" placeholder="Type item name..." oninput="renderSaleSearchResults(this.value)"/>
+      <div class="field"><label>Search or browse products</label>
+        <input id="saleSearch" placeholder="Tap to browse, or type to search..." oninput="renderSaleSearchResults(this.value)" onfocus="renderSaleSearchResults(this.value)"/>
       </div>
       <div id="saleSearchResults"></div>
     </div>
@@ -983,11 +1081,33 @@ function renderSales(){
 
     ${saleDraft.items.length ? `
     <div class="card">
+      <h3>Customer</h3>
+      <div class="field"><label>Customer name</label>
+        <input value="${saleDraft.customer}" oninput="saleDraft.customer=this.value" placeholder="Walk-in (default) or type a name"/>
+      </div>
+      <div class="field"><label>Link to a customer ledger (optional, for credit sales)</label>
+        <select onchange="saleDraft.partyId=this.value||null; if(this.value){const p=db.parties.find(x=>x.id===this.value); if(p) saleDraft.customer=p.name;} render();">
+          <option value="">Cash sale — don't track on a ledger</option>
+          ${db.parties.filter(p=>p.type==='customer').map(p=>`<option value="${p.id}" ${saleDraft.partyId===p.id?'selected':''}>${p.name}</option>`).join('')}
+        </select>
+      </div>
+      ${saleDraft.partyId ? `
+      <div class="row2">
+        <div class="field"><label>Paid in full?</label>
+          <select onchange="saleDraft.paidInFull=(this.value==='yes'); render();">
+            <option value="yes" ${saleDraft.paidInFull!==false?'selected':''}>Yes, paid in full</option>
+            <option value="no" ${saleDraft.paidInFull===false?'selected':''}>No, on credit / partial</option>
+          </select>
+        </div>
+        ${saleDraft.paidInFull===false ? `<div class="field"><label>Amount paid now</label><input type="number" value="${saleDraft.amountPaid||0}" oninput="saleDraft.amountPaid=Number(this.value)"/></div>` : ''}
+      </div>` : ''}
+    </div>
+    <div class="card">
       <h3>Bill summary</h3>
-      <div class="total-line"><span>Subtotal</span><span>${fmt(totalAmt)}</span></div>
+      <div class="total-line"><span>Item total (MRP)</span><span>${fmt(totalAmt)}</span></div>
       <div class="total-line"><span>Discount</span><span>-${fmt(totalDisc)}</span></div>
-      <div class="total-line"><span>GST</span><span>${fmt(totalGst)}</span></div>
-      <div class="total-line grand"><span>Grand total</span><span>${fmt(grand)}</span></div>
+      <div class="total-line"><span>GST (included above)</span><span>${fmt(totalGst)}</span></div>
+      <div class="total-line grand"><span>Customer pays</span><span>${fmt(grand)}</span></div>
     </div>
     <button class="btn btn-primary" onclick="saveSale()">Save bill</button>
     ` : ''}
@@ -996,15 +1116,56 @@ function renderSales(){
 
 function renderSaleSearchResults(q){
   const box = document.getElementById('saleSearchResults');
-  if(!q || q.trim().length<1){ box.innerHTML=''; return; }
-  const matches = db.stock.filter(s=> s.qty>0 && s.itemName.toLowerCase().includes(q.toLowerCase())).slice(0,6);
-  if(!matches.length){ box.innerHTML = `<div class="empty" style="padding:14px;">No matching stock found.</div>`; return; }
-  box.innerHTML = matches.map(s=>`
-    <div class="list-row" style="cursor:pointer;" onclick="pickStockForSale('${s.id}')">
+  const query = (q||'').trim().toLowerCase();
+  const matches = db.stock
+    .filter(s=> s.qty>0 && (!query || s.itemName.toLowerCase().includes(query)))
+    .slice(0, query ? 20 : 50);
+  if(!matches.length){ box.innerHTML = `<div class="empty" style="padding:14px;">${query ? 'No matching stock found.' : 'No stock available yet.'}</div>`; return; }
+  box.innerHTML = matches.map(s=>{
+    const qty = saleQtyForStock(s.id);
+    const control = qty>0
+      ? `<div style="display:flex;align-items:center;gap:8px;">
+           <button class="chip" style="padding:6px 12px;" onclick="decrementSaleStock('${s.id}')">−</button>
+           <span style="min-width:18px;text-align:center;font-weight:700;">${qty}</span>
+           <button class="chip" style="padding:6px 12px;" onclick="incrementSaleStock('${s.id}')">+</button>
+         </div>`
+      : `<button class="btn btn-primary btn-sm" onclick="incrementSaleStock('${s.id}')">Add +</button>`;
+    return `
+    <div class="list-row">
       <div><div class="li-main">${s.itemName}</div><div class="li-sub">Batch ${s.batch} • Qty ${s.qty} • Exp ${s.expiry}</div></div>
-      <div class="li-right">${fmt(s.mrp)}</div>
-    </div>
-  `).join('');
+      ${control}
+    </div>`;
+  }).join('');
+}
+function saleQtyForStock(stockId){
+  const it = saleDraft.items.find(x=>x.stockId===stockId);
+  return it ? Number(it.qty)||0 : 0;
+}
+function refreshSaleScreenKeepSearch(){
+  const box = document.getElementById('saleSearch');
+  const q = box ? box.value : '';
+  render();
+  const newBox = document.getElementById('saleSearch');
+  if(newBox){ newBox.value = q; renderSaleSearchResults(q); }
+}
+function incrementSaleStock(stockId){
+  if(!stockId) return;
+  const it = saleDraft.items.find(x=>x.stockId===stockId);
+  if(it){ it.qty = (Number(it.qty)||0)+1; refreshSaleScreenKeepSearch(); }
+  else { pickStockForSaleKeepList(stockId); }
+}
+function decrementSaleStock(stockId){
+  const idx = saleDraft.items.findIndex(x=>x.stockId===stockId);
+  if(idx<0) return;
+  const newQty = (Number(saleDraft.items[idx].qty)||0)-1;
+  if(newQty<=0){ saleDraft.items.splice(idx,1); } else { saleDraft.items[idx].qty = newQty; }
+  refreshSaleScreenKeepSearch();
+}
+function pickStockForSaleKeepList(stockId){
+  const s = db.stock.find(x=>x.id===stockId);
+  if(!s) return;
+  saleDraft.items.push({stockId:s.id, itemName:s.itemName, batch:s.batch, qty:1, freeQty:0, discount:0, rate:s.mrp, gst:s.gst});
+  refreshSaleScreenKeepSearch();
 }
 function pickStockForSale(stockId){
   const s = db.stock.find(x=>x.id===stockId);
@@ -1029,18 +1190,23 @@ function saveSale(){
     }
   }
   const id = nextId('SAL');
-  let totalAmount=0, totalGst=0, totalDiscount=0;
+  const billNo = nextBillNoLocal();
+  let totalNet=0, totalGst=0, totalDiscount=0;
   saleDraft.items.forEach(it=>{
-    const amt = Number(it.qty)*Number(it.rate);
-    const disc = amt*Number(it.discount)/100;
-    const gstAmt = (amt-disc)*Number(it.gst)/100;
-    totalAmount += amt-disc; totalGst += gstAmt; totalDiscount += disc;
+    const gross = Number(it.qty)*Number(it.rate);
+    const disc = gross*Number(it.discount)/100;
+    const net = gross-disc; // MRP already includes GST — this is what the customer pays
+    const taxable = net/(1+Number(it.gst)/100);
+    const gstAmt = net-taxable;
+    totalNet += net; totalGst += gstAmt; totalDiscount += disc;
     const s = db.stock.find(x=>x.id===it.stockId);
     s.qty -= (Number(it.qty)+Number(it.freeQty));
   });
-  db.sales.push({id, date:todayStr(), customer:saleDraft.customer||'Walk-in', items:saleDraft.items, totalAmount:totalAmount+totalGst, totalGst, totalDiscount});
+  const fullSaleTotal = totalNet;
+  const saleAmountPaid = saleDraft.partyId ? (saleDraft.paidInFull!==false ? fullSaleTotal : Number(saleDraft.amountPaid)||0) : fullSaleTotal;
+  db.sales.push({id, billNo, date:todayStr(), customer:saleDraft.customer||'Walk-in', items:saleDraft.items, totalAmount:fullSaleTotal, totalGst, totalDiscount, partyId:saleDraft.partyId||null, amountPaid:saleAmountPaid});
   saveDB(db);
-  saleDraft = {customer:'', items:[]};
+  saleDraft = {customer:'', items:[], partyId:null, paidInFull:true, amountPaid:0};
   openPrintPreview('sale', id);
 }
 
@@ -1052,7 +1218,7 @@ function renderSaleReturn(){
       <div class="card">
         <h3>Find the bill</h3>
         <div class="field"><label>Search by bill number</label>
-          <input id="sReturnSearch" placeholder="e.g. SAL-0007" oninput="renderSReturnSearchResults(this.value)"/>
+          <input id="sReturnSearch" placeholder="e.g. HDH-00007" oninput="renderSReturnSearchResults(this.value)"/>
         </div>
         <div id="sReturnSearchResults"></div>
       </div>
@@ -1073,12 +1239,19 @@ function renderSaleReturn(){
       </div>
     </div>
   `).join('');
-  const totalValue = saleReturnDraft.items.reduce((a,it)=>a+Number(it.qty)*Number(it.rate),0);
-  const totalGst = saleReturnDraft.items.reduce((a,it)=>a+Number(it.qty)*Number(it.rate)*Number(it.gst)/100,0);
+  const totalValue = saleReturnDraft.items.reduce((a,it)=>{
+    const amt = Number(it.qty)*Number(it.rate);
+    return a + amt/(1+Number(it.gst)/100);
+  },0);
+  const totalGst = saleReturnDraft.items.reduce((a,it)=>{
+    const amt = Number(it.qty)*Number(it.rate);
+    return a + (amt - amt/(1+Number(it.gst)/100));
+  },0);
+  const totalRefund = saleReturnDraft.items.reduce((a,it)=>a+Number(it.qty)*Number(it.rate),0);
 
   return `
     <div class="card">
-      <h3>${sale.id}</h3>
+      <h3>${sale.billNo||sale.id}</h3>
       <div class="li-sub">${sale.date} • ${sale.customer}</div>
       <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="saleReturnDraft={sale:null,items:[]};render()">← Choose a different bill</button>
     </div>
@@ -1088,9 +1261,9 @@ function renderSaleReturn(){
     </div>
     <div class="card">
       <h3>Return summary</h3>
-      <div class="total-line"><span>Value</span><span>${fmt(totalValue)}</span></div>
-      <div class="total-line"><span>GST</span><span>${fmt(totalGst)}</span></div>
-      <div class="total-line grand"><span>Total refund</span><span>${fmt(totalValue+totalGst)}</span></div>
+      <div class="total-line"><span>Taxable value</span><span>${fmt(totalValue)}</span></div>
+      <div class="total-line"><span>GST (included above)</span><span>${fmt(totalGst)}</span></div>
+      <div class="total-line grand"><span>Total refund</span><span>${fmt(totalRefund)}</span></div>
     </div>
     <button class="btn btn-primary" onclick="saveSaleReturn()">Confirm & save return</button>
   `;
@@ -1098,11 +1271,12 @@ function renderSaleReturn(){
 function renderSReturnSearchResults(q){
   const box = document.getElementById('sReturnSearchResults');
   if(!q || q.trim().length<1){ box.innerHTML=''; return; }
-  const matches = db.sales.filter(s=> s.id.toLowerCase().includes(q.toLowerCase()) || (s.customer||'').toLowerCase().includes(q.toLowerCase())).slice(0,8);
+  const query = q.toLowerCase();
+  const matches = db.sales.filter(s=> (s.billNo||s.id).toLowerCase().includes(query) || (s.customer||'').toLowerCase().includes(query)).slice(0,8);
   if(!matches.length){ box.innerHTML = `<div class="empty" style="padding:14px;">No matching bill found.</div>`; return; }
   box.innerHTML = matches.map(s=>`
     <div class="list-row" style="cursor:pointer;" onclick="pickSaleForReturn('${s.id}')">
-      <div><div class="li-main">${s.id}</div><div class="li-sub">${s.date} • ${s.customer}</div></div>
+      <div><div class="li-main">${s.billNo||s.id}</div><div class="li-sub">${s.date} • ${s.customer}</div></div>
       <div class="li-right">${fmt(s.totalAmount)}</div>
     </div>
   `).join('');
@@ -1127,13 +1301,15 @@ function saveSaleReturn(){
   let totalAmount=0, totalGst=0;
   valid.forEach(it=>{
     const amt = Number(it.qty)*Number(it.rate);
-    const gstAmt = amt*Number(it.gst)/100;
+    const taxable = amt/(1+Number(it.gst)/100);
+    const gstAmt = amt-taxable;
     totalAmount += amt; totalGst += gstAmt;
     const s = db.stock.find(x=>x.id===it.stockId);
     if(s) s.qty += Number(it.qty);
   });
   const id = nextId('SRET');
-  db.saleReturns.push({id, date:todayStr(), refSaleId:saleReturnDraft.sale.id, items:valid, totalAmount, totalGst});
+  const billNo = nextBillNoLocal();
+  db.saleReturns.push({id, billNo, date:todayStr(), refSaleId:saleReturnDraft.sale.billNo||saleReturnDraft.sale.id, items:valid, totalAmount, totalGst});
   saveDB(db);
   saleReturnDraft = {sale:null, items:[]};
   openPrintPreview('saleReturn', id);
@@ -1144,16 +1320,18 @@ async function saveSaleReturnCloud(){
   try{
     const batchWrite = fsDB.batch();
     const retRef = fsDB.collection('saleReturns').doc();
+    const billNo = await nextBillNoCloud();
     let totalAmount=0, totalGst=0;
     valid.forEach(it=>{
-      totalAmount += Number(it.qty)*Number(it.rate);
-      totalGst += Number(it.qty)*Number(it.rate)*Number(it.gst)/100;
+      const amt = Number(it.qty)*Number(it.rate);
+      const taxable = amt/(1+Number(it.gst)/100);
+      totalAmount += amt; totalGst += (amt-taxable);
       if(it.stockId){
         const stockRef = fsDB.collection('stock').doc(it.stockId);
         batchWrite.set(stockRef, {qty: firebase.firestore.FieldValue.increment(Number(it.qty))}, {merge:true});
       }
     });
-    batchWrite.set(retRef, {date:todayStr(), refSaleId:saleReturnDraft.sale.id, items:valid, totalAmount, totalGst, createdAt: firebase.firestore.FieldValue.serverTimestamp()});
+    batchWrite.set(retRef, {date:todayStr(), billNo, refSaleId:saleReturnDraft.sale.billNo||saleReturnDraft.sale.id, items:valid, totalAmount, totalGst, createdAt: firebase.firestore.FieldValue.serverTimestamp()});
     await batchWrite.commit();
     saleReturnDraft = {sale:null, items:[]};
     openPrintPreview('saleReturn', retRef.id);
@@ -1220,8 +1398,8 @@ function renderReports(){
   const salesGst = sales.reduce((a,s)=>a+s.totalGst,0);
   const purchaseTotal = purchases.reduce((a,p)=>a+p.totalAmount+p.totalGst,0);
   const purchaseGst = purchases.reduce((a,p)=>a+p.totalGst,0);
-  const saleReturnTotal = saleReturns.reduce((a,r)=>a+r.totalAmount+r.totalGst,0);
-  const purchaseReturnTotal = purchaseReturns.reduce((a,r)=>a+r.totalAmount+r.totalGst,0);
+  const saleReturnTotal = saleReturns.reduce((a,r)=>a+(r.totalAmount||0),0);
+  const purchaseReturnTotal = purchaseReturns.reduce((a,r)=>a+(r.totalAmount||0)+(r.totalGst||0),0);
   const netSales = salesTotal - saleReturnTotal;
   const netPurchases = purchaseTotal - purchaseReturnTotal;
 
@@ -1243,25 +1421,25 @@ function renderReports(){
     <div class="card">
       <h3>${reportMode==='daily'?"Today's":"This month's"} sale bills (${sales.length})</h3>
       ${sales.length ? sales.map(s=>`
-        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('sale','${s.id}')"><div><div class="li-main">${s.id}</div><div class="li-sub">${s.date} • ${s.customer}</div></div><div class="li-right">${fmt(s.totalAmount)}</div></div>
+        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('sale','${s.id}')"><div><div class="li-main">${s.billNo||s.id}</div><div class="li-sub">${s.date} • ${s.customer}</div></div><div class="li-right">${fmt(s.totalAmount)}</div></div>
       `).join('') : `<div class="empty">No sales recorded.</div>`}
     </div>
     <div class="card">
       <h3>${reportMode==='daily'?"Today's":"This month's"} purchases (${purchases.length})</h3>
       ${purchases.length ? purchases.map(p=>`
-        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('purchase','${p.id}')"><div><div class="li-main">${p.id}</div><div class="li-sub">${p.date} • ${p.supplier}</div></div><div class="li-right">${fmt(p.totalAmount+p.totalGst)}</div></div>
+        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('purchase','${p.id}')"><div><div class="li-main">${p.billNo||p.id}</div><div class="li-sub">${p.date} • ${p.supplier}</div></div><div class="li-right">${fmt(p.totalAmount+p.totalGst)}</div></div>
       `).join('') : `<div class="empty">No purchases recorded.</div>`}
     </div>
     <div class="card">
       <h3>${reportMode==='daily'?"Today's":"This month's"} sale returns (${saleReturns.length})</h3>
       ${saleReturns.length ? saleReturns.map(r=>`
-        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('saleReturn','${r.id}')"><div><div class="li-main">${r.id}</div><div class="li-sub">${r.date} • against ${r.refSaleId}</div></div><div class="li-right">${fmt(r.totalAmount+r.totalGst)}</div></div>
+        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('saleReturn','${r.id}')"><div><div class="li-main">${r.billNo||r.id}</div><div class="li-sub">${r.date} • against ${r.refSaleId}</div></div><div class="li-right">${fmt(r.totalAmount)}</div></div>
       `).join('') : `<div class="empty">No sale returns recorded.</div>`}
     </div>
     <div class="card">
       <h3>${reportMode==='daily'?"Today's":"This month's"} purchase returns (${purchaseReturns.length})</h3>
       ${purchaseReturns.length ? purchaseReturns.map(r=>`
-        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('purchaseReturn','${r.id}')"><div><div class="li-main">${r.id}</div><div class="li-sub">${r.date} • ${r.items.length} item(s)</div></div><div class="li-right">${fmt(r.totalAmount+r.totalGst)}</div></div>
+        <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('purchaseReturn','${r.id}')"><div><div class="li-main">${r.billNo||r.id}</div><div class="li-sub">${r.date} • ${r.items.length} item(s)</div></div><div class="li-right">${fmt(r.totalAmount+r.totalGst)}</div></div>
       `).join('') : `<div class="empty">No purchase returns recorded.</div>`}
     </div>
     <div class="step" style="margin-top:4px;">Tap any row above to view or reprint that document.</div>
@@ -1316,6 +1494,9 @@ function renderPrintPreview(){
   const items = record.items || [];
   totalAmount = record.totalAmount || 0;
   totalGst = record.totalGst || 0;
+  const inclusive = (type==='sale' || type==='saleReturn'); // MRP-based docs already include GST
+  const taxableValue = inclusive ? (totalAmount-totalGst) : totalAmount;
+  const grandTotal = inclusive ? totalAmount : (totalAmount+totalGst);
 
   itemsRows = items.map(it=>{
     const qty = it.qty!=null ? it.qty : '';
@@ -1342,7 +1523,7 @@ function renderPrintPreview(){
           <div class="doctitle">${docTitle}</div>
         </div>
         <div class="doc-meta">
-          <span>Doc no: <b style="color:var(--ink-900);">${record.id}</b></span>
+          <span>Doc no: <b style="color:var(--ink-900);">${record.billNo||record.id}</b></span>
           <span>Date: <b style="color:var(--ink-900);">${record.date}</b></span>
         </div>
         <div class="step" style="margin-bottom:10px;">${refLine}</div>
@@ -1350,9 +1531,9 @@ function renderPrintPreview(){
           <thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">GST</th><th class="num">Amount</th></tr></thead>
           <tbody>${itemsRows}</tbody>
         </table>
-        <div class="total-line"><span>Taxable value</span><span>${fmt(totalAmount)}</span></div>
-        <div class="total-line"><span>GST</span><span>${fmt(totalGst)}</span></div>
-        <div class="total-line grand"><span>Total</span><span>${fmt(totalAmount+totalGst)}</span></div>
+        <div class="total-line"><span>Taxable value</span><span>${fmt(taxableValue)}</span></div>
+        <div class="total-line"><span>GST${inclusive?' (included above)':''}</span><span>${fmt(totalGst)}</span></div>
+        <div class="total-line grand"><span>Total</span><span>${fmt(grandTotal)}</span></div>
         <div class="step" style="margin-top:14px;text-align:center;">This is a system-generated document from Hussain Drug House.</div>
       </div>
     </div>
@@ -1365,6 +1546,177 @@ function renderPrintPreview(){
 window.openPrintPreview = openPrintPreview;
 window.closePrintPreview = closePrintPreview;
 window.printNow = printNow;
+
+/* ===================== PARTIES / LEDGER ===================== */
+/* Tracks running balance per supplier/customer. Linking a purchase or sale
+   to a party is optional — if you don't pick one, everything works exactly
+   as before (a plain free-text name, no balance tracking). Only linked
+   transactions count toward a party's balance. */
+
+function openParties(){
+  currentScreen = 'parties';
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('screenTitle').textContent = titles.parties[0];
+  document.getElementById('screenNote').textContent = titles.parties[1];
+  render();
+}
+let openPartyId = null;
+function openPartyDetail(id){
+  openPartyId = id;
+  currentScreen = 'partyDetail';
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('screenTitle').textContent = titles.partyDetail[0];
+  document.getElementById('screenNote').textContent = titles.partyDetail[1];
+  render();
+}
+function closeParties(){ setScreen('dashboard'); }
+window.openParties = openParties;
+window.openPartyDetail = openPartyDetail;
+window.closeParties = closeParties;
+
+/* Balance owed: for a supplier, positive = you owe them. For a customer,
+   positive = they owe you. */
+function partyBalance(partyId){
+  const party = db.parties.find(p=>p.id===partyId);
+  if(!party) return 0;
+  let bal = Number(party.openingBalance)||0;
+  if(party.type==='supplier'){
+    db.purchases.filter(p=>p.partyId===partyId).forEach(p=>{
+      const total = (p.totalAmount||0)+(p.totalGst||0);
+      bal += total - (p.amountPaid!=null ? p.amountPaid : total);
+    });
+  } else {
+    db.sales.filter(s=>s.partyId===partyId).forEach(s=>{
+      const total = s.totalAmount||0;
+      bal += total - (s.amountPaid!=null ? s.amountPaid : total);
+    });
+  }
+  db.payments.filter(pay=>pay.partyId===partyId).forEach(pay=>{ bal -= Number(pay.amount)||0; });
+  return bal;
+}
+function totalToPay(){
+  return db.parties.filter(p=>p.type==='supplier').reduce((a,p)=>a+Math.max(0,partyBalance(p.id)),0);
+}
+function totalToCollect(){
+  return db.parties.filter(p=>p.type==='customer').reduce((a,p)=>a+Math.max(0,partyBalance(p.id)),0);
+}
+function stockValue(){
+  return db.stock.reduce((a,s)=>a+(Number(s.qty)||0)*(Number(s.purchaseRate)||0),0);
+}
+function thisWeekSales(){
+  const now = new Date();
+  const weekAgo = new Date(now.getTime()-7*24*60*60*1000);
+  return db.sales.filter(s=>new Date(s.date) >= weekAgo).reduce((a,s)=>a+s.totalAmount,0);
+}
+
+let partyFormType = 'supplier';
+function renderPartiesList(){
+  const suppliers = db.parties.filter(p=>p.type==='supplier');
+  const customers = db.parties.filter(p=>p.type==='customer');
+  const row = p => `
+    <div class="list-row" style="cursor:pointer;" onclick="openPartyDetail('${p.id}')">
+      <div><div class="li-main">${p.name}</div><div class="li-sub">${p.phone||'No phone on file'}</div></div>
+      <div class="li-right" style="color:${partyBalance(p.id)>0?'var(--red-700)':'var(--teal-700)'};">${fmt(Math.abs(partyBalance(p.id)))}</div>
+    </div>`;
+  return `
+    <button class="btn btn-ghost no-print" style="margin-bottom:10px;" onclick="closeParties()">← Back to Dashboard</button>
+    <div class="card">
+      <h3>Add a party</h3>
+      <div class="segment">
+        <button class="${partyFormType==='supplier'?'active':''}" onclick="partyFormType='supplier';render()">Supplier</button>
+        <button class="${partyFormType==='customer'?'active':''}" onclick="partyFormType='customer';render()">Customer</button>
+      </div>
+      <div class="field"><label>Name</label><input id="newPartyName" placeholder="e.g. Ahil Medicine Trader"/></div>
+      <div class="row2">
+        <div class="field"><label>Phone (optional)</label><input id="newPartyPhone"/></div>
+        <div class="field"><label>Opening balance</label><input id="newPartyOpening" type="number" value="0"/></div>
+      </div>
+      <button class="btn btn-primary" onclick="saveParty()">+ Add ${partyFormType}</button>
+    </div>
+    <div class="card">
+      <h3>Suppliers — you owe them (${suppliers.length})</h3>
+      ${suppliers.length ? suppliers.map(row).join('') : `<div class="empty">No suppliers added yet.</div>`}
+    </div>
+    <div class="card">
+      <h3>Customers — they owe you (${customers.length})</h3>
+      ${customers.length ? customers.map(row).join('') : `<div class="empty">No customers added yet.</div>`}
+    </div>
+  `;
+}
+function saveParty(){
+  const name = document.getElementById('newPartyName').value.trim();
+  if(!name){ alert('Enter a name.'); return; }
+  const phone = document.getElementById('newPartyPhone').value.trim();
+  const opening = Number(document.getElementById('newPartyOpening').value)||0;
+  const party = {name, phone, type:partyFormType, openingBalance:opening};
+  if(CLOUD_MODE){
+    fsDB.collection('parties').add(Object.assign({}, party, {createdAt:firebase.firestore.FieldValue.serverTimestamp()}))
+      .catch(e=>alert('Could not save: '+e.message));
+  } else {
+    party.id = nextId('PTY');
+    db.parties.push(party);
+    saveDB(db);
+    render();
+  }
+}
+window.saveParty = saveParty;
+
+function renderPartyDetail(){
+  const party = db.parties.find(p=>p.id===openPartyId);
+  if(!party) return `<div class="empty">Party not found.</div><button class="btn btn-ghost" onclick="openParties()">← Back</button>`;
+  const bal = partyBalance(party.id);
+  const isSupplier = party.type==='supplier';
+  const txns = isSupplier
+    ? db.purchases.filter(p=>p.partyId===party.id).map(p=>({id:p.billNo||p.id, date:p.date, label:'Purchase', amount:(p.totalAmount||0)+(p.totalGst||0), paid:p.amountPaid}))
+    : db.sales.filter(s=>s.partyId===party.id).map(s=>({id:s.billNo||s.id, date:s.date, label:'Sale', amount:s.totalAmount, paid:s.amountPaid}));
+  const pays = db.payments.filter(pay=>pay.partyId===party.id).map(pay=>({id:pay.id, date:pay.date, label:isSupplier?'Payment made':'Payment received', amount:pay.amount}));
+  const allRows = txns.map(t=>({date:t.date, text:`${t.label} ${t.id}`, sub:`Paid ${fmt(t.paid!=null?t.paid:t.amount)} of ${fmt(t.amount)}`, amt:t.amount-(t.paid!=null?t.paid:t.amount)}))
+    .concat(pays.map(p=>({date:p.date, text:p.label, sub:'', amt:-Number(p.amount)})))
+    .sort((a,b)=> a.date < b.date ? 1 : -1);
+
+  return `
+    <button class="btn btn-ghost no-print" style="margin-bottom:10px;" onclick="openParties()">← Back to Parties</button>
+    <div class="card">
+      <h3>${party.name}</h3>
+      <div class="step">${party.phone||'No phone on file'}</div>
+      <div class="stat" style="margin-top:10px;">
+        <div class="num" style="color:${bal>0?'var(--red-700)':'var(--teal-700)'};">${fmt(Math.abs(bal))}</div>
+        <div class="lbl">${bal>0 ? (isSupplier?'You owe them':'They owe you') : 'Settled up'}</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Record a payment</h3>
+      <div class="row2">
+        <div class="field"><label>Amount</label><input id="paymentAmount" type="number" placeholder="0"/></div>
+        <div class="field"><label>Note (optional)</label><input id="paymentNote" placeholder="e.g. cash, UPI"/></div>
+      </div>
+      <button class="btn btn-primary" onclick="recordPayment('${party.id}')">${isSupplier?'Record payment made':'Record payment received'}</button>
+    </div>
+    <div class="card">
+      <h3>History</h3>
+      ${allRows.length ? allRows.map(r=>`
+        <div class="list-row"><div><div class="li-main">${r.text}</div><div class="li-sub">${r.date} ${r.sub?'• '+r.sub:''}</div></div>
+        <div class="li-right" style="color:${r.amt>0?'var(--red-700)':'var(--teal-700)'};">${fmt(Math.abs(r.amt))}</div></div>
+      `).join('') : `<div class="empty">No transactions linked to this party yet.</div>`}
+    </div>
+  `;
+}
+function recordPayment(partyId){
+  const amount = Number(document.getElementById('paymentAmount').value);
+  if(!amount || amount<=0){ alert('Enter a valid amount.'); return; }
+  const note = document.getElementById('paymentNote').value.trim();
+  const payment = {partyId, date:todayStr(), amount, note};
+  if(CLOUD_MODE){
+    fsDB.collection('payments').add(Object.assign({}, payment, {createdAt:firebase.firestore.FieldValue.serverTimestamp()}))
+      .catch(e=>alert('Could not save: '+e.message));
+  } else {
+    payment.id = nextId('PAY');
+    db.payments.push(payment);
+    saveDB(db);
+    render();
+  }
+}
+window.recordPayment = recordPayment;
 
 function attachHandlers(){
   const photoInput = document.getElementById('photoInput');
@@ -1423,6 +1775,85 @@ async function ensureFirestoreSafePhoto(dataURL){
   }
   return current;
 }
+
+/* ===================== ITEM PICKER (reuse existing stock items) =====================
+   Instead of retyping a product's name/rate/GST every time you buy or sell
+   the same thing again, browse or search everything already in stock and
+   tap Add. For Purchase this pre-fills name/rate/MRP/GST from the last time
+   you bought it — batch, expiry and quantity are always left for you to
+   enter fresh, since those genuinely change bill to bill. */
+let itemPickerContext = 'purchase'; // 'purchase' or 'sale' (sale has its own inline picker already; kept here for future reuse)
+
+function getUniqueStockItems(){
+  const seen = {};
+  const list = [];
+  db.stock.forEach(s=>{
+    const key = s.itemName.trim().toLowerCase();
+    if(!seen[key]){ seen[key] = true; list.push(s); }
+  });
+  return list.sort((a,b)=>a.itemName.localeCompare(b.itemName));
+}
+
+function openItemPicker(context){
+  itemPickerContext = context;
+  document.getElementById('itemPickerSearch').value = '';
+  renderItemPickerList('');
+  document.getElementById('itemPickerModal').style.display='flex';
+}
+function closeItemPicker(){
+  document.getElementById('itemPickerModal').style.display='none';
+  render(); // refresh the purchase/sale screen behind it with whatever was added
+}
+function renderItemPickerList(query){
+  const box = document.getElementById('itemPickerList');
+  const all = getUniqueStockItems();
+  const q = (query||'').trim().toLowerCase();
+  const matches = q ? all.filter(s=>s.itemName.toLowerCase().includes(q)) : all;
+  let html = `<div class="list-row" style="cursor:pointer;" onclick="closeItemPicker();addPurchaseItem();">
+      <div class="li-main" style="color:var(--teal-700);">+ Create new product not listed here</div>
+    </div>`;
+  if(!matches.length){
+    html += `<div class="empty" style="padding:20px 0;">No matching products in stock yet — use "Create new product" above.</div>`;
+  } else {
+    html += matches.map(s=>{
+      const safeName = s.itemName.replace(/'/g,"\\'");
+      const activeIdx = purchaseDraft.items.findIndex(it=>it.itemName===s.itemName && it.batch==='' && it.fromPicker);
+      const qtyInCart = activeIdx>-1 ? Number(purchaseDraft.items[activeIdx].qty)||0 : 0;
+      const control = qtyInCart>0
+        ? `<div style="display:flex;align-items:center;gap:8px;">
+             <button class="chip" style="padding:6px 12px;" onclick="stepPickerQty('${safeName}',-1)">−</button>
+             <span style="min-width:18px;text-align:center;font-weight:700;">${qtyInCart}</span>
+             <button class="chip" style="padding:6px 12px;" onclick="stepPickerQty('${safeName}',1)">+</button>
+           </div>`
+        : `<button class="btn btn-primary btn-sm" onclick="addFromPicker('${safeName}', '${s.mrp}', '${s.purchaseRate}', '${s.gst}')">Add +</button>`;
+      return `
+      <div class="list-row">
+        <div><div class="li-main">${s.itemName}</div><div class="li-sub">Last MRP ${fmt(s.mrp)} • Last cost ${fmt(s.purchaseRate)} • GST ${s.gst}%</div></div>
+        ${control}
+      </div>`;
+    }).join('');
+  }
+  box.innerHTML = html;
+}
+function addFromPicker(itemName, mrp, rate, gst){
+  purchaseDraft.items.push({
+    itemName: itemName, batch:'', expiry:'', qty:1, freeQty:0,
+    rate: Number(rate)||0, mrp: Number(mrp)||0, gst: Number(gst)||5, detected:null, fromPicker:true
+  });
+  renderItemPickerList(document.getElementById('itemPickerSearch').value);
+}
+function stepPickerQty(itemName, delta){
+  const idx = purchaseDraft.items.findIndex(it=>it.itemName===itemName && it.batch==='' && it.fromPicker);
+  if(idx===-1) return;
+  purchaseDraft.items[idx].qty = (Number(purchaseDraft.items[idx].qty)||0) + delta;
+  if(purchaseDraft.items[idx].qty<=0){ purchaseDraft.items.splice(idx,1); }
+  renderItemPickerList(document.getElementById('itemPickerSearch').value);
+}
+window.openItemPicker = openItemPicker;
+window.closeItemPicker = closeItemPicker;
+window.renderItemPickerList = renderItemPickerList;
+window.addFromPicker = addFromPicker;
+window.stepPickerQty = stepPickerQty;
 
 /* ===================== OCR (Google Cloud Vision, optional) =====================
    Reads text off a bill photo so you don't have to re-read tiny print off
@@ -1508,7 +1939,10 @@ async function extractTextFromPhoto(){
     if(data.error){ throw new Error(data.error.message || 'Vision API error'); }
     const text = data.responses && data.responses[0] && data.responses[0].fullTextAnnotation
       ? data.responses[0].fullTextAnnotation.text : '';
-    ocrLines = text.split('\n').map(l=>l.trim()).filter(l=>l.length>1);
+    const noise = /^(drug lic|food lic|d\.?l\.?\s*no|gst invoice|credit|inv\s*no|billed by|ph\s*:|state\s*:|date\s*:|for\s|e\.?\s*&\s*o\.?\s*e|rs\.?\s*five|total|ledger|goods total|other misc|item discount|scheme disc|bill disc|cgst payable|sgst payable|description|pack$|batch$|qty\+?fre)/i;
+    ocrLines = text.split('\n').map(l=>l.trim())
+      .filter(l=>l.length>1 && !noise.test(l))
+      .map(l=>l.replace(/^\d{1,3}\s+(?=[A-Za-z])/, ''));
     if(!ocrLines.length) alert('No readable text found in this photo — try a clearer, well-lit shot.');
   }catch(e){
     console.error(e);
@@ -1530,55 +1964,25 @@ async function extractTableFromPhoto(){
     const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${key}`, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ requests:[{ image:{content:base64}, features:[{type:'DOCUMENT_TEXT_DETECTION'}] }] })
+      body: JSON.stringify({ requests:[{ image:{content:base64}, features:[{type:'TEXT_DETECTION'}] }] })
     });
     const data = await resp.json();
     if(data.error){ throw new Error(data.error.message || 'Vision API error'); }
-    const fta = data.responses && data.responses[0] && data.responses[0].fullTextAnnotation;
-    if(!fta || !fta.pages){ alert('No readable text found — try a clearer, well-lit, flatter photo.'); ocrBusy=false; render(); return; }
+    const text = data.responses && data.responses[0] && data.responses[0].fullTextAnnotation
+      ? data.responses[0].fullTextAnnotation.text : '';
+    if(!text){ alert('No readable text found — try a clearer, well-lit, flatter photo.'); ocrBusy=false; render(); return; }
 
-    // Flatten every word with its center position on the photo.
-    const words = [];
-    fta.pages.forEach(page=>{
-      (page.blocks||[]).forEach(block=>{
-        (block.paragraphs||[]).forEach(para=>{
-          (para.words||[]).forEach(word=>{
-            const text = (word.symbols||[]).map(s=>s.text).join('');
-            const verts = (word.boundingBox && word.boundingBox.vertices) || [];
-            if(!verts.length || !text) return;
-            const xs = verts.map(v=>v.x||0), ys = verts.map(v=>v.y||0);
-            const cx = xs.reduce((a,b)=>a+b,0)/xs.length;
-            const cy = ys.reduce((a,b)=>a+b,0)/ys.length;
-            const h = Math.max(...ys)-Math.min(...ys);
-            words.push({text, cx, cy, h});
-          });
-        });
-      });
-    });
-    if(!words.length){ alert('No readable text found.'); ocrBusy=false; render(); return; }
-
-    // Cluster words into rows by vertical proximity.
-    const avgH = words.reduce((a,w)=>a+(w.h||10),0)/words.length;
-    const rowGap = Math.max(10, avgH*0.7);
-    words.sort((a,b)=>a.cy-b.cy);
-    const rows = [];
-    words.forEach(w=>{
-      let row = rows.find(r=>Math.abs(r.y-w.cy) < rowGap);
-      if(!row){ row = {y:w.cy, words:[]}; rows.push(row); }
-      row.words.push(w);
-      row.y = row.words.reduce((a,x)=>a+x.cy,0)/row.words.length;
-    });
-    rows.forEach(r=>r.words.sort((a,b)=>a.cx-b.cx));
-    const rowTexts = rows.map(r=>r.words.map(w=>w.text).join(' '));
-
+    const lines = text.split('\n').map(l=>l.trim()).filter(l=>l.length>1);
     const parsed = [];
-    rowTexts.forEach(rowText=>{
-      const qtyFreeMatch = rowText.match(/(\d{1,4})\s*\+\s*(\d{1,3})/);
-      const expiryMatch = rowText.match(/\b(\d{1,2})\/(\d{2,4})\b/);
-      const decimals = (rowText.match(/\d+\.\d{2}\b/g) || []);
-      const descMatch = rowText.match(/^([A-Za-z][A-Za-z\-\s]{2,40}?)(?=\s+\d)/);
-      // Only treat this as a product row if it has an item-name-looking start
-      // AND at least a qty+free pattern or two decimal numbers (MRP, Rate).
+    lines.forEach(rawLine=>{
+      // Strip a leading serial number column, e.g. "1 DNS SALINE (AXA)" -> "DNS SALINE (AXA)"
+      const line = rawLine.replace(/^\d{1,3}\s+(?=[A-Za-z])/, '');
+      const qtyFreeMatch = line.match(/(\d{1,4})\s*\+\s*(\d{1,3})/);
+      const expiryMatch = line.match(/\b(\d{1,2})\/(\d{2,4})\b/);
+      const decimals = (line.match(/\d+\.\d{2}\b/g) || []);
+      // A product line: starts with letters, and has either a qty+free pattern
+      // or at least two decimal numbers (MRP, Rate) somewhere in it.
+      const descMatch = line.match(/^([A-Za-z][A-Za-z0-9\-\.\s\(\)]{2,45}?)(?=\s+[\d(])/) || line.match(/^([A-Za-z][A-Za-z0-9\-\.\s\(\)]{2,45})$/);
       if(!descMatch) return;
       if(!qtyFreeMatch && decimals.length<2) return;
       const description = descMatch[1].trim();
@@ -1605,90 +2009,4 @@ async function extractTableFromPhoto(){
     });
 
     if(!parsed.length){
-      alert('Couldn\'t confidently detect item rows in this photo. Try "Read text (tap lines)" instead, or add items manually.');
-    } else {
-      parsed.forEach(p=> purchaseDraft.items.push(p));
-    }
-  }catch(e){
-    console.error(e);
-    alert('Could not read the bill table: '+e.message+'\n\nCheck that Cloud Vision API is enabled and billing is linked for your project.');
-  }
-  ocrBusy = false; render();
-}
-
-function addOcrLineAsItem(i){
-  const line = ocrLines[i];
-  if(!line) return;
-  purchaseDraft.items.push({itemName:line, batch:'', expiry:'', qty:0, freeQty:0, rate:0, mrp:0, gst:12, detected:'from photo text'});
-  render();
-}
-window.extractTableFromPhoto = extractTableFromPhoto;
-
-window.openOcrModal = openOcrModal;
-window.saveOcrKey = saveOcrKey;
-window.removeOcrKey = removeOcrKey;
-window.extractTextFromPhoto = extractTextFromPhoto;
-window.addOcrLineAsItem = addOcrLineAsItem;
-
-/* expose functions used in inline handlers */
-window.setScreen = setScreen;
-window.addPurchaseItem = addPurchaseItem;
-window.removePurchaseItem = removePurchaseItem;
-window.updatePurchaseItem = updatePurchaseItem;
-window.bumpFree = bumpFree;
-window.savePurchase = savePurchase;
-window.renderSaleSearchResults = renderSaleSearchResults;
-window.pickStockForSale = pickStockForSale;
-window.removeSaleItem = removeSaleItem;
-window.updateSaleItem = updateSaleItem;
-window.saveSale = saveSale;
-window.render = render;
-
-/* One-time repair: older versions of this app could assign the same ID to
-   two different products (a numbering bug). This rebuilds every stock ID
-   from its item name + batch (which can never collide), merges any rows
-   that turn out to be true duplicates, and fixes historical sale/return
-   records to point at the corrected IDs. Safe to run every load. */
-function repairStockIds(){
-  const merged = {};
-  db.stock.forEach(s=>{
-    const newId = slugId(s.itemName, s.batch);
-    if(merged[newId]){
-      merged[newId].qty = (merged[newId].qty||0) + (s.qty||0);
-      merged[newId].purchaseRate = s.purchaseRate;
-      merged[newId].mrp = s.mrp;
-      merged[newId].gst = s.gst;
-      if(s.expiry) merged[newId].expiry = s.expiry;
-    } else {
-      merged[newId] = Object.assign({}, s, {id:newId});
-    }
-  });
-  db.stock = Object.values(merged);
-  const fixRefs = (arr)=>{ (arr||[]).forEach(rec=>{
-    (rec.items||[]).forEach(it=>{ if(it.itemName && it.batch) it.stockId = slugId(it.itemName, it.batch); });
-  }); };
-  fixRefs(db.sales); fixRefs(db.saleReturns); fixRefs(db.purchaseReturns);
-  saveDB(db);
-}
-
-/* ===================== STARTUP ===================== */
-const cloudStarting = initCloudIfConfigured();
-updateCloudBadge();
-
-if(!cloudStarting){
-  /* Local mode: seed a sample item so Stock/Sales aren't empty on first open */
-  if(db.stock.length===0){
-    db.stock.push({id:slugId('Paracetamol 500mg','PB2201'), itemName:'Paracetamol 500mg', batch:'PB2201', expiry:'12/2027', mrp:12, purchaseRate:8.5, gst:12, qty:120});
-    db.stock.push({id:slugId('Amoxicillin 250mg','AX0987'), itemName:'Amoxicillin 250mg', batch:'AX0987', expiry:'03/2026', mrp:45, purchaseRate:32, gst:12, qty:8});
-    saveDB(db);
-  } else {
-    repairStockIds();
-  }
-  render();
-} else {
-  /* Cloud mode: show empty state until the first Firestore snapshot arrives */
-  document.getElementById('main').innerHTML = '<div class="empty" style="padding:60px 10px;"><div class="e-icon">☁</div>Connecting to your Firebase project…</div>';
-}
-</script>
-</body>
-</html>
+      alert('Couldn\'t confidently detect item rows in this photo. Try "Read text (tap lines)" in
