@@ -2009,4 +2009,92 @@ async function extractTableFromPhoto(){
     });
 
     if(!parsed.length){
-      alert('Couldn\'t confidently detect item rows in this photo. Try "Read text (tap lines)" in
+      alert('Couldn\'t confidently detect item rows in this photo. Try "Read text (tap lines)" instead, or add items manually.');
+    } else {
+      parsed.forEach(p=> purchaseDraft.items.push(p));
+    }
+  }catch(e){
+    console.error(e);
+    alert('Could not read the bill table: '+e.message+'\n\nCheck that Cloud Vision API is enabled and billing is linked for your project.');
+  }
+  ocrBusy = false; render();
+}
+
+function addOcrLineAsItem(i){
+  const raw = ocrLines[i];
+  if(!raw) return;
+  // Strip a leading serial number column, e.g. "1 DNS SALINE (AXA)" -> "DNS SALINE (AXA)"
+  const line = raw.replace(/^\d{1,3}\s+(?=[A-Za-z])/, '');
+  purchaseDraft.items.push({itemName:line, batch:'', expiry:'', qty:0, freeQty:0, rate:0, mrp:0, gst:5, detected:'from photo text'});
+  render();
+}
+window.extractTableFromPhoto = extractTableFromPhoto;
+
+window.openOcrModal = openOcrModal;
+window.saveOcrKey = saveOcrKey;
+window.removeOcrKey = removeOcrKey;
+window.extractTextFromPhoto = extractTextFromPhoto;
+window.addOcrLineAsItem = addOcrLineAsItem;
+
+/* expose functions used in inline handlers */
+window.setScreen = setScreen;
+window.addPurchaseItem = addPurchaseItem;
+window.removePurchaseItem = removePurchaseItem;
+window.updatePurchaseItem = updatePurchaseItem;
+window.bumpFree = bumpFree;
+window.savePurchase = savePurchase;
+window.renderSaleSearchResults = renderSaleSearchResults;
+window.pickStockForSale = pickStockForSale;
+window.removeSaleItem = removeSaleItem;
+window.updateSaleItem = updateSaleItem;
+window.saveSale = saveSale;
+window.render = render;
+
+/* One-time repair: older versions of this app could assign the same ID to
+   two different products (a numbering bug). This rebuilds every stock ID
+   from its item name + batch (which can never collide), merges any rows
+   that turn out to be true duplicates, and fixes historical sale/return
+   records to point at the corrected IDs. Safe to run every load. */
+function repairStockIds(){
+  const merged = {};
+  db.stock.forEach(s=>{
+    const newId = slugId(s.itemName, s.batch);
+    if(merged[newId]){
+      merged[newId].qty = (merged[newId].qty||0) + (s.qty||0);
+      merged[newId].purchaseRate = s.purchaseRate;
+      merged[newId].mrp = s.mrp;
+      merged[newId].gst = s.gst;
+      if(s.expiry) merged[newId].expiry = s.expiry;
+    } else {
+      merged[newId] = Object.assign({}, s, {id:newId});
+    }
+  });
+  db.stock = Object.values(merged);
+  const fixRefs = (arr)=>{ (arr||[]).forEach(rec=>{
+    (rec.items||[]).forEach(it=>{ if(it.itemName && it.batch) it.stockId = slugId(it.itemName, it.batch); });
+  }); };
+  fixRefs(db.sales); fixRefs(db.saleReturns); fixRefs(db.purchaseReturns);
+  saveDB(db);
+}
+
+/* ===================== STARTUP ===================== */
+const cloudStarting = initCloudIfConfigured();
+updateCloudBadge();
+
+if(!cloudStarting){
+  /* Local mode: seed a sample item so Stock/Sales aren't empty on first open */
+  if(db.stock.length===0){
+    db.stock.push({id:slugId('Paracetamol 500mg','PB2201'), itemName:'Paracetamol 500mg', batch:'PB2201', expiry:'12/2027', mrp:12, purchaseRate:8.5, gst:12, qty:120});
+    db.stock.push({id:slugId('Amoxicillin 250mg','AX0987'), itemName:'Amoxicillin 250mg', batch:'AX0987', expiry:'03/2026', mrp:45, purchaseRate:32, gst:12, qty:8});
+    saveDB(db);
+  } else {
+    repairStockIds();
+  }
+  render();
+} else {
+  /* Cloud mode: show empty state until the first Firestore snapshot arrives */
+  document.getElementById('main').innerHTML = '<div class="empty" style="padding:60px 10px;"><div class="e-icon">☁</div>Connecting to your Firebase project…</div>';
+}
+</script>
+</body>
+</html>
