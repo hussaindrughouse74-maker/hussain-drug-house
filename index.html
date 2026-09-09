@@ -1815,20 +1815,21 @@ function recordPayment(partyId){
 window.recordPayment = recordPayment;
 
 /* ===================== EDIT SAVED BILL ===================== */
-/* For fixing something missed at the time — linking the right party/customer,
-   or adding an item that got left off. This does NOT let you change the
-   quantity of items already saved (that would need to reverse and reapply
-   stock, which is a separate, riskier operation) — only add a new item or
-   fix the party link. */
+/* Full edit: existing items' qty/rate/batch/expiry/GST can all be changed,
+   items can be removed, new items added, and the party/customer link fixed.
+   Stock is corrected safely by reversing exactly what the ORIGINAL bill did,
+   then reapplying exactly what the EDITED bill does — so stock stays
+   accurate no matter how much changes. */
 let editBillContext = null;
 
 function openEditBill(type, id){
   const record = type==='purchase' ? db.purchases.find(p=>p.id===id) : db.sales.find(s=>s.id===id);
   if(!record){ alert('Bill not found.'); return; }
   editBillContext = {
-    type, id, record,
+    type, id,
     partyId: record.partyId||null,
-    newItems: []
+    items: JSON.parse(JSON.stringify(record.items||[])),        // editable working copy
+    originalItems: JSON.parse(JSON.stringify(record.items||[])) // pristine copy, used to reverse old stock impact
   };
   currentScreen = 'editBill';
   document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
@@ -1847,35 +1848,30 @@ window.closeEditBill = closeEditBill;
 
 function renderEditBill(){
   if(!editBillContext) return `<div class="empty">Nothing to edit.</div>`;
-  const { type, record } = editBillContext;
+  const { type, partyId, items } = editBillContext;
   const isPurchase = type==='purchase';
+  const partyOptions = db.parties.filter(p=>p.type===(isPurchase?'supplier':'customer'));
 
-  const existingItemsHtml = (record.items||[]).map(it=>`
-    <div class="list-row">
-      <div><div class="li-main">${it.itemName}${it.batch?` (${it.batch})`:''}</div><div class="li-sub">Qty ${it.qty}${it.freeQty?` +${it.freeQty} free`:''} • Rate ${fmt(it.rate)}</div></div>
-    </div>
-  `).join('');
-
-  const newItemsHtml = editBillContext.newItems.map((it,idx)=>{
+  const itemsHtml = items.map((it,idx)=>{
     if(isPurchase){
       return `
       <div class="item-row-card">
-        <button class="rm" onclick="removeEditNewItem(${idx})">×</button>
-        <div class="field"><label>Item name</label><input value="${it.itemName}" oninput="updateEditNewItem(${idx},'itemName',this.value)"/></div>
+        <button class="rm" onclick="removeEditItem(${idx})">×</button>
+        <div class="field"><label>Item name</label><input value="${it.itemName}" oninput="updateEditItem(${idx},'itemName',this.value)"/></div>
         <div class="row2">
-          <div class="field"><label>Batch no.</label><input value="${it.batch}" oninput="updateEditNewItem(${idx},'batch',this.value)"/></div>
+          <div class="field"><label>Batch no.</label><input value="${it.batch}" oninput="updateEditItem(${idx},'batch',this.value)"/></div>
           <div class="field"><label>Expiry (MM/YY)</label><input value="${it.expiry}" oninput="maskEditExpiry(this,${idx})" placeholder="12/27" maxlength="5"/></div>
         </div>
         <div class="row2">
-          <div class="field"><label>Purchase qty</label><input type="number" value="${it.qty||''}" placeholder="0" oninput="updateEditNewItem(${idx},'qty',this.value)"/></div>
-          <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty||''}" placeholder="0" oninput="updateEditNewItem(${idx},'freeQty',this.value)"/></div>
+          <div class="field"><label>Purchase qty</label><input type="number" value="${it.qty||''}" placeholder="0" oninput="updateEditItem(${idx},'qty',this.value)"/></div>
+          <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty||''}" placeholder="0" oninput="updateEditItem(${idx},'freeQty',this.value)"/></div>
         </div>
         <div class="row2">
-          <div class="field"><label>Rate/unit</label><input type="number" value="${it.rate||''}" placeholder="0" oninput="updateEditNewItem(${idx},'rate',this.value)"/></div>
-          <div class="field"><label>MRP</label><input type="number" value="${it.mrp||''}" placeholder="0" oninput="updateEditNewItem(${idx},'mrp',this.value)"/></div>
+          <div class="field"><label>Rate/unit</label><input type="number" value="${it.rate||''}" placeholder="0" oninput="updateEditItem(${idx},'rate',this.value)"/></div>
+          <div class="field"><label>MRP</label><input type="number" value="${it.mrp||''}" placeholder="0" oninput="updateEditItem(${idx},'mrp',this.value)"/></div>
         </div>
         <div class="field"><label>GST %</label>
-          <select onchange="updateEditNewItem(${idx},'gst',this.value)">
+          <select onchange="updateEditItem(${idx},'gst',this.value)">
             ${[0,5,12,18,28].map(g=>`<option value="${g}" ${Number(it.gst)===g?'selected':''}>${g}%</option>`).join('')}
           </select>
         </div>
@@ -1883,25 +1879,25 @@ function renderEditBill(){
     } else {
       return `
       <div class="item-row-card">
-        <button class="rm" onclick="removeEditNewItem(${idx})">×</button>
+        <button class="rm" onclick="removeEditItem(${idx})">×</button>
         <div class="li-main">${it.itemName} <span style="color:var(--ink-500);font-weight:500;">(${it.batch})</span></div>
-        <div class="row2" style="margin-top:8px;">
-          <div class="field"><label>Sale qty</label><input type="number" value="${it.qty}" onchange="updateEditNewItem(${idx},'qty',this.value)"/></div>
-          <div class="field"><label>Discount %</label><input type="number" value="${it.discount||''}" placeholder="0" onchange="updateEditNewItem(${idx},'discount',this.value)"/></div>
+        <div class="row3" style="margin-top:8px;">
+          <div class="field"><label>Sale qty</label><input type="number" value="${it.qty}" onchange="updateEditItem(${idx},'qty',this.value)"/></div>
+          <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty||''}" placeholder="0" onchange="updateEditItem(${idx},'freeQty',this.value)"/></div>
+          <div class="field"><label>Discount %</label><input type="number" value="${it.discount||''}" placeholder="0" onchange="updateEditItem(${idx},'discount',this.value)"/></div>
         </div>
-        <div style="font-size:12px;color:var(--ink-500);">Rate (MRP) ${fmt(it.rate)} • GST ${it.gst}%</div>
+        <div class="field" style="margin-top:8px;"><label>Rate (MRP, incl. GST)</label><input type="number" value="${it.rate||''}" placeholder="0" onchange="updateEditItem(${idx},'rate',this.value)"/></div>
+        <div class="field"><label>GST %</label>
+          <select onchange="updateEditItem(${idx},'gst',this.value)">
+            ${[0,5,12,18,28].map(g=>`<option value="${g}" ${Number(it.gst)===g?'selected':''}>${g}%</option>`).join('')}
+          </select>
+        </div>
       </div>`;
     }
   }).join('');
 
-  const partyOptions = db.parties.filter(p=>p.type===(isPurchase?'supplier':'customer'));
-
   return `
     <button class="btn btn-ghost no-print" style="margin-bottom:10px;" onclick="closeEditBill()">← Back to bill</button>
-    <div class="card">
-      <h3>${record.billNo||record.id}</h3>
-      <div class="step">${record.date} • ${isPurchase?record.supplier:record.customer}</div>
-    </div>
     <div class="card">
       <h3>Fix ${isPurchase?'supplier':'customer'} link</h3>
       <div class="field"><label>${isPurchase?'Supplier':'Customer'}</label>
@@ -1912,15 +1908,14 @@ function renderEditBill(){
       </div>
     </div>
     <div class="card">
-      <h3>Items already on this bill</h3>
-      ${existingItemsHtml || `<div class="empty">No items.</div>`}
-      <div class="step" style="margin-top:8px;">Quantities here can't be changed from this screen — that needs a return/adjustment instead, so stock stays accurate. Use this screen only to add something that was missed.</div>
+      <h3>Items on this bill</h3>
+      ${itemsHtml || `<div class="empty">No items — add at least one below.</div>`}
+      <div class="step" style="margin-top:8px;">Editing quantity/rate here corrects stock automatically — the original amounts are undone and the new ones applied, so stock stays accurate.</div>
     </div>
     <div class="card">
-      <h3>Add a missed item</h3>
-      ${newItemsHtml || `<div class="empty">Nothing added yet.</div>`}
+      <h3>Add another item</h3>
       ${isPurchase
-        ? `<button class="btn btn-ghost" onclick="addEditNewItemBlank()">+ Add item row</button>`
+        ? `<button class="btn btn-ghost" onclick="addEditItemBlank()">+ Add item row</button>`
         : `<div class="field"><label>Search stock item</label><input id="editSaleSearch" placeholder="Type item name..." oninput="renderEditSaleSearch(this.value)"/></div><div id="editSaleSearchResults"></div>`
       }
     </div>
@@ -1928,20 +1923,20 @@ function renderEditBill(){
   `;
 }
 
-function addEditNewItemBlank(){
-  editBillContext.newItems.push({itemName:'',batch:'',expiry:'',qty:0,freeQty:0,rate:0,mrp:0,gst:5});
+function addEditItemBlank(){
+  editBillContext.items.push({itemName:'',batch:'',expiry:'',qty:0,freeQty:0,rate:0,mrp:0,gst:5});
   render();
 }
-function removeEditNewItem(idx){ editBillContext.newItems.splice(idx,1); render(); }
-function updateEditNewItem(idx,field,val){
+function removeEditItem(idx){ editBillContext.items.splice(idx,1); render(); }
+function updateEditItem(idx,field,val){
   const strFields = ['itemName','batch','expiry'];
-  editBillContext.newItems[idx][field] = strFields.includes(field) ? val : Number(val);
+  editBillContext.items[idx][field] = strFields.includes(field) ? val : Number(val);
 }
 function maskEditExpiry(el, idx){
   let digits = el.value.replace(/[^0-9]/g, '').slice(0, 4);
   let formatted = digits.length>2 ? digits.slice(0,2)+'/'+digits.slice(2) : digits;
   el.value = formatted;
-  updateEditNewItem(idx, 'expiry', formatted);
+  updateEditItem(idx, 'expiry', formatted);
 }
 function renderEditSaleSearch(q){
   const box = document.getElementById('editSaleSearchResults');
@@ -1959,132 +1954,174 @@ function renderEditSaleSearch(q){
 function addEditSaleItem(stockId){
   const s = db.stock.find(x=>x.id===stockId);
   if(!s) return;
-  editBillContext.newItems.push({stockId:s.id, itemName:s.itemName, batch:s.batch, qty:1, discount:0, rate:s.mrp, gst:s.gst});
+  editBillContext.items.push({stockId:s.id, itemName:s.itemName, batch:s.batch, qty:1, freeQty:0, discount:0, rate:s.mrp, gst:s.gst});
   document.getElementById('editSaleSearch').value='';
   render();
 }
-window.addEditNewItemBlank = addEditNewItemBlank;
-window.removeEditNewItem = removeEditNewItem;
-window.updateEditNewItem = updateEditNewItem;
+window.addEditItemBlank = addEditItemBlank;
+window.removeEditItem = removeEditItem;
+window.updateEditItem = updateEditItem;
 window.maskEditExpiry = maskEditExpiry;
 window.renderEditSaleSearch = renderEditSaleSearch;
 window.addEditSaleItem = addEditSaleItem;
 
 function saveEditBill(){
   if(CLOUD_MODE){ saveEditBillCloud(); return; }
-  const { type, id, partyId, newItems } = editBillContext;
+  const { type, id, partyId, items, originalItems } = editBillContext;
+
   if(type==='purchase'){
     const rec = db.purchases.find(p=>p.id===id);
     if(!rec) return;
-    const valid = newItems.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
+    const valid = items.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
+    if(!valid.length){ alert('A purchase needs at least one item.'); return; }
+
+    // Reverse exactly what the original bill added to stock.
+    originalItems.forEach(it=>{
+      const s = findStock(it.itemName, it.batch);
+      if(s) s.qty -= (Number(it.qty)+Number(it.freeQty||0));
+    });
+    // Reapply exactly what the edited bill should add.
+    let totalAmount=0, totalGst=0;
     valid.forEach(it=>{
       const amt = Number(it.qty)*Number(it.rate);
-      const gstAmt = amt*Number(it.gst)/100;
-      rec.totalAmount = (rec.totalAmount||0) + amt;
-      rec.totalGst = (rec.totalGst||0) + gstAmt;
-      rec.items.push(it);
-      let stockRow = findStock(it.itemName, it.batch);
+      totalAmount += amt; totalGst += amt*Number(it.gst)/100;
+      let s = findStock(it.itemName, it.batch);
       const typedMrp = Number(it.mrp)>0 ? Number(it.mrp) : Number(it.rate)*1.2;
-      if(!stockRow){
-        stockRow = {id: slugId(it.itemName, it.batch), itemName:it.itemName.trim(), batch:it.batch.trim(), expiry:it.expiry, mrp:typedMrp, purchaseRate:Number(it.rate), gst:Number(it.gst), qty:0};
-        db.stock.push(stockRow);
+      if(!s){
+        s = {id: slugId(it.itemName, it.batch), itemName:it.itemName.trim(), batch:it.batch.trim(), expiry:it.expiry, mrp:typedMrp, purchaseRate:Number(it.rate), gst:Number(it.gst), qty:0};
+        db.stock.push(s);
       }
-      stockRow.qty += Number(it.qty)+Number(it.freeQty);
+      s.qty += Number(it.qty)+Number(it.freeQty||0);
+      s.purchaseRate = Number(it.rate);
+      s.mrp = typedMrp;
+      if(it.expiry) s.expiry = it.expiry;
     });
-    rec.partyId = partyId;
+    rec.items = valid;
+    rec.totalAmount = totalAmount;
+    rec.totalGst = totalGst;
+    rec.partyId = partyId||null;
     saveDB(db);
+
   } else {
     const rec = db.sales.find(s=>s.id===id);
     if(!rec) return;
-    for(const it of newItems){
+    const valid = items.filter(it=>Number(it.qty)>0);
+    if(!valid.length){ alert('A sale needs at least one item.'); return; }
+
+    // Reverse exactly what the original sale took out of stock.
+    originalItems.forEach(it=>{
       const s = db.stock.find(x=>x.id===it.stockId);
-      if(!s || s.qty < Number(it.qty)){ alert(`Not enough stock for ${it.itemName}. Available: ${s?s.qty:0}`); return; }
+      if(s) s.qty += (Number(it.qty)+Number(it.freeQty||0));
+    });
+    // Check the edited quantities are actually available before committing.
+    for(const it of valid){
+      const s = db.stock.find(x=>x.id===it.stockId);
+      const needed = Number(it.qty)+Number(it.freeQty||0);
+      if(!s || s.qty < needed){
+        // undo the reversal above so nothing is left half-changed
+        originalItems.forEach(it2=>{
+          const s2 = db.stock.find(x=>x.id===it2.stockId);
+          if(s2) s2.qty -= (Number(it2.qty)+Number(it2.freeQty||0));
+        });
+        alert(`Not enough stock for ${it.itemName}. Available: ${s?s.qty:0}`);
+        return;
+      }
     }
-    newItems.forEach(it=>{
+    let totalAmount=0, totalGst=0, totalDiscount=0;
+    valid.forEach(it=>{
       const gross = Number(it.qty)*Number(it.rate);
-      const disc = gross*Number(it.discount)/100;
+      const disc = gross*Number(it.discount||0)/100;
       const net = gross-disc;
       const taxable = net/(1+Number(it.gst)/100);
-      rec.totalAmount = (rec.totalAmount||0) + net;
-      rec.totalGst = (rec.totalGst||0) + (net-taxable);
-      rec.totalDiscount = (rec.totalDiscount||0) + disc;
-      rec.items.push(it);
+      totalAmount += net; totalGst += (net-taxable); totalDiscount += disc;
       const s = db.stock.find(x=>x.id===it.stockId);
-      s.qty -= Number(it.qty);
+      s.qty -= (Number(it.qty)+Number(it.freeQty||0));
     });
-    rec.partyId = partyId;
+    rec.items = valid;
+    rec.totalAmount = totalAmount;
+    rec.totalGst = totalGst;
+    rec.totalDiscount = totalDiscount;
+    rec.partyId = partyId||null;
     saveDB(db);
   }
+
   const ctx = editBillContext;
   editBillContext = null;
   openPrintPreview(ctx.type, ctx.id);
 }
 
 async function saveEditBillCloud(){
-  const { type, id, partyId, newItems } = editBillContext;
+  const { type, id, partyId, items, originalItems } = editBillContext;
   try{
     if(type==='purchase'){
-      const valid = newItems.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
-      const purchaseRef = fsDB.collection('purchases').doc(id);
-      if(!valid.length){
-        await purchaseRef.update({partyId: partyId||null});
-      } else {
-      const batchWrite = fsDB.batch();
-      let addAmount=0, addGst=0;
+      const valid = items.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
+      if(!valid.length){ alert('A purchase needs at least one item.'); return; }
+
+      // Net stock delta per item+batch: reverse the original, then apply the edited version.
+      const deltas = {};
+      originalItems.forEach(it=>{
+        const key = slugId(it.itemName, it.batch);
+        deltas[key] = (deltas[key]||0) - (Number(it.qty)+Number(it.freeQty||0));
+      });
+      let totalAmount=0, totalGst=0;
+      const patches = {};
       valid.forEach(it=>{
-        const amt = Number(it.qty)*Number(it.rate);
-        const gstAmt = amt*Number(it.gst)/100;
-        addAmount += amt; addGst += gstAmt;
-        const stockRef = fsDB.collection('stock').doc(slugId(it.itemName, it.batch));
-        const patch = {
+        const key = slugId(it.itemName, it.batch);
+        deltas[key] = (deltas[key]||0) + (Number(it.qty)+Number(it.freeQty||0));
+        patches[key] = {
           itemName: it.itemName.trim(), batch: it.batch.trim(),
           purchaseRate: Number(it.rate), gst: Number(it.gst),
-          mrp: Number(it.mrp)>0 ? Number(it.mrp) : Number(it.rate)*1.2,
-          qty: firebase.firestore.FieldValue.increment(Number(it.qty)+Number(it.freeQty))
+          mrp: Number(it.mrp)>0 ? Number(it.mrp) : Number(it.rate)*1.2
         };
-        if(it.expiry) patch.expiry = it.expiry;
+        if(it.expiry) patches[key].expiry = it.expiry;
+        const amt = Number(it.qty)*Number(it.rate);
+        totalAmount += amt; totalGst += amt*Number(it.gst)/100;
+      });
+      const batchWrite = fsDB.batch();
+      Object.keys(deltas).forEach(key=>{
+        const stockRef = fsDB.collection('stock').doc(key);
+        const patch = Object.assign({}, patches[key]||{}, {qty: firebase.firestore.FieldValue.increment(deltas[key])});
         batchWrite.set(stockRef, patch, {merge:true});
       });
-      batchWrite.update(purchaseRef, {
-        items: firebase.firestore.FieldValue.arrayUnion(...valid),
-        totalAmount: firebase.firestore.FieldValue.increment(addAmount),
-        totalGst: firebase.firestore.FieldValue.increment(addGst),
-        partyId: partyId||null
+      batchWrite.update(fsDB.collection('purchases').doc(id), {
+        items: valid, totalAmount, totalGst, partyId: partyId||null
       });
       await batchWrite.commit();
-      }
+
     } else {
+      const valid = items.filter(it=>Number(it.qty)>0);
+      if(!valid.length){ alert('A sale needs at least one item.'); return; }
+
+      // Net stock delta per stockId: give back the original, take the edited version.
+      const deltas = {};
+      originalItems.forEach(it=>{
+        deltas[it.stockId] = (deltas[it.stockId]||0) + (Number(it.qty)+Number(it.freeQty||0));
+      });
+      valid.forEach(it=>{
+        deltas[it.stockId] = (deltas[it.stockId]||0) - (Number(it.qty)+Number(it.freeQty||0));
+      });
       const saleRef = fsDB.collection('sales').doc(id);
-      if(!newItems.length){
-        await saleRef.update({partyId: partyId||null});
-      } else {
       await fsDB.runTransaction(async (tx)=>{
-        const refs = newItems.map(it=>fsDB.collection('stock').doc(it.stockId));
+        const keys = Object.keys(deltas);
+        const refs = keys.map(k=>fsDB.collection('stock').doc(k));
         const snaps = await Promise.all(refs.map(r=>tx.get(r)));
         snaps.forEach((snap,i)=>{
-          const it = newItems[i];
-          const avail = snap.exists ? (snap.data().qty||0) : 0;
-          if(Number(it.qty) > avail) throw new Error(`Not enough stock for ${it.itemName}. Available: ${avail}`);
+          const current = snap.exists ? (snap.data().qty||0) : 0;
+          if(current + deltas[keys[i]] < 0) throw new Error('Not enough stock available to apply this change.');
         });
-        let addAmount=0, addGst=0, addDisc=0;
         snaps.forEach((snap,i)=>{
-          const it = newItems[i];
-          tx.update(refs[i], {qty: firebase.firestore.FieldValue.increment(-Number(it.qty))});
+          tx.update(refs[i], {qty: firebase.firestore.FieldValue.increment(deltas[keys[i]])});
+        });
+        let totalAmount=0, totalGst=0, totalDiscount=0;
+        valid.forEach(it=>{
           const gross = Number(it.qty)*Number(it.rate);
-          const disc = gross*Number(it.discount)/100;
+          const disc = gross*Number(it.discount||0)/100;
           const net = gross-disc;
           const taxable = net/(1+Number(it.gst)/100);
-          addAmount += net; addGst += (net-taxable); addDisc += disc;
+          totalAmount += net; totalGst += (net-taxable); totalDiscount += disc;
         });
-        tx.update(saleRef, {
-          items: firebase.firestore.FieldValue.arrayUnion(...newItems),
-          totalAmount: firebase.firestore.FieldValue.increment(addAmount),
-          totalGst: firebase.firestore.FieldValue.increment(addGst),
-          totalDiscount: firebase.firestore.FieldValue.increment(addDisc),
-          partyId: partyId||null
-        });
+        tx.update(saleRef, {items: valid, totalAmount, totalGst, totalDiscount, partyId: partyId||null});
       });
-      }
     }
     const ctx = editBillContext;
     editBillContext = null;
