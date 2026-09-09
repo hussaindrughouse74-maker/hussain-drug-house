@@ -670,7 +670,8 @@ const titles = {
   reports:['Reports','Daily & monthly summary'],
   printPreview:['Document','Preview & print'],
   parties:['Parties','Suppliers & customers — who you owe, who owes you'],
-  partyDetail:['Party ledger','Transaction history & balance']
+  partyDetail:['Party ledger','Transaction history & balance'],
+  editBill:['Edit bill','Fix a missing party or add a missed item']
 };
 
 function setScreen(name){
@@ -691,6 +692,7 @@ function render(){
   if(currentScreen==='printPreview'){ main.innerHTML = renderPrintPreview(); attachHandlers(); return; }
   if(currentScreen==='parties'){ main.innerHTML = renderPartiesList(); attachHandlers(); return; }
   if(currentScreen==='partyDetail'){ main.innerHTML = renderPartyDetail(); attachHandlers(); return; }
+  if(currentScreen==='editBill'){ main.innerHTML = renderEditBill(); attachHandlers(); return; }
   if(currentScreen==='dashboard') main.innerHTML = renderDashboard();
   else if(currentScreen==='purchase') main.innerHTML = renderPurchase();
   else if(currentScreen==='sales') main.innerHTML = renderSales();
@@ -1099,7 +1101,7 @@ function renderSales(){
     <div class="card">
       <h3>Add item to bill</h3>
       <div class="field"><label>Search or browse products</label>
-        <input id="saleSearch" placeholder="Tap to browse, or type to search..." oninput="renderSaleSearchResults(this.value)" onfocus="renderSaleSearchResults(this.value)"/>
+        <input id="saleSearch" placeholder="Type item name to search..." oninput="renderSaleSearchResults(this.value)"/>
       </div>
       <div id="saleSearchResults"></div>
     </div>
@@ -1156,10 +1158,11 @@ function renderSales(){
 function renderSaleSearchResults(q){
   const box = document.getElementById('saleSearchResults');
   const query = (q||'').trim().toLowerCase();
+  if(!query){ box.innerHTML = ''; return; }
   const matches = db.stock
-    .filter(s=> s.qty>0 && (!query || s.itemName.toLowerCase().includes(query)))
-    .slice(0, query ? 20 : 50);
-  if(!matches.length){ box.innerHTML = `<div class="empty" style="padding:14px;">${query ? 'No matching stock found.' : 'No stock available yet.'}</div>`; return; }
+    .filter(s=> s.qty>0 && s.itemName.toLowerCase().includes(query))
+    .slice(0, 20);
+  if(!matches.length){ box.innerHTML = `<div class="empty" style="padding:14px;">No matching stock found.</div>`; return; }
   box.innerHTML = matches.map(s=>{
     const qty = saleQtyForStock(s.id);
     const control = qty>0
@@ -1387,10 +1390,10 @@ window.saveSaleReturn = saveSaleReturn;
 /* ===================== STOCK SCREEN ===================== */
 let stockFilter = 'all';
 function renderStock(){
-  let rows = db.stock.filter(s=>s.qty>0 || stockFilter==='out');
+  let rows = db.stock.filter(s=>s.qty>0);
   if(stockFilter==='low') rows = rows.filter(s=>s.qty>0 && s.qty<=1);
   if(stockFilter==='exp') rows = rows.filter(s=>daysUntil(s.expiry)<=90);
-  if(stockFilter==='out') rows = db.stock.filter(s=>s.qty<=0);
+  if(stockFilter==='expired') rows = db.stock.filter(s=>daysUntil(s.expiry)<0);
 
   const q = (document.getElementById('stockSearch')?.value || '').toLowerCase();
   if(q) rows = rows.filter(s=>s.itemName.toLowerCase().includes(q));
@@ -1415,7 +1418,7 @@ function renderStock(){
       <button class="${stockFilter==='all'?'active':''}" onclick="stockFilter='all';render()">All</button>
       <button class="${stockFilter==='low'?'active':''}" onclick="stockFilter='low';render()">Low</button>
       <button class="${stockFilter==='exp'?'active':''}" onclick="stockFilter='exp';render()">Expiring</button>
-      <button class="${stockFilter==='out'?'active':''}" onclick="stockFilter='out';render()">Out</button>
+      <button class="${stockFilter==='expired'?'active':''}" onclick="stockFilter='expired';render()">Expired</button>
     </div>
     <div class="card">
       ${rowsHtml || `<div class="empty"><div class="e-icon">📭</div>No stock items match.</div>`}
@@ -1451,14 +1454,14 @@ function renderReports(){
     </div>
     ${reportMode==='monthly' ? `<div class="field"><label>Month</label><input type="month" value="${selectedMonth}" onchange="selectedMonth=this.value;render()"/></div>` : ''}
     <div class="stat-grid">
-      <div class="stat"><div class="num">${fmt(salesTotal)}</div><div class="lbl">Sales (incl. GST)</div></div>
-      <div class="stat"><div class="num">${fmt(purchaseTaxable)}</div><div class="lbl">Purchases — taxable</div></div>
-      <div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Purchases — total (incl. GST)</div></div>
-      <div class="stat"><div class="num">${fmt(saleReturnTotal)}</div><div class="lbl">Sale returns</div></div>
-      <div class="stat"><div class="num">${fmt(purchaseReturnTotal)}</div><div class="lbl">Purchase returns</div></div>
-      <div class="stat"><div class="num">${fmt(netSales)}</div><div class="lbl">Net sales</div></div>
-      <div class="stat"><div class="num">${fmt(salesGst)}</div><div class="lbl">GST on sales</div></div>
-      <div class="stat"><div class="num">${fmt(purchaseGst)}</div><div class="lbl">GST on purchases</div></div>
+      <div class="stat"><div class="num">${fmt(salesTotal)}</div><div class="lbl">Sale (incl. GST)</div></div>
+      <div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Purchase (net, incl. GST)</div></div>
+      <div class="stat"><div class="num">${fmt(netSales)}</div><div class="lbl">Net sale</div></div>
+      <div class="stat"><div class="num">${fmt(purchaseTaxable)}</div><div class="lbl">Purchase — taxable</div></div>
+      <div class="stat"><div class="num">${fmt(salesGst)}</div><div class="lbl">GST on sale</div></div>
+      <div class="stat"><div class="num">${fmt(purchaseGst)}</div><div class="lbl">GST on purchase</div></div>
+      <div class="stat"><div class="num">${fmt(saleReturnTotal)}</div><div class="lbl">Sale return</div></div>
+      <div class="stat"><div class="num">${fmt(purchaseReturnTotal)}</div><div class="lbl">Purchase return</div></div>
     </div>
     <div class="card">
       <h3>${reportMode==='daily'?"Today's":('Month of '+month)} sale bills (${sales.length})</h3>
@@ -1583,6 +1586,10 @@ function renderPrintPreview(){
       <button class="btn btn-ghost" onclick="closePrintPreview('${backScreen}')">← Back</button>
       <button class="btn btn-primary" onclick="printNow()">🖨 Print / Save as PDF</button>
     </div>
+    ${(type==='purchase'||type==='sale') ? `
+    <div class="no-print" style="margin-top:8px;">
+      <button class="btn btn-ghost" onclick="openEditBill('${type}','${id}')">✏️ Edit this bill</button>
+    </div>` : ''}
   `;
 }
 window.openPrintPreview = openPrintPreview;
@@ -1806,6 +1813,288 @@ function recordPayment(partyId){
   }
 }
 window.recordPayment = recordPayment;
+
+/* ===================== EDIT SAVED BILL ===================== */
+/* For fixing something missed at the time — linking the right party/customer,
+   or adding an item that got left off. This does NOT let you change the
+   quantity of items already saved (that would need to reverse and reapply
+   stock, which is a separate, riskier operation) — only add a new item or
+   fix the party link. */
+let editBillContext = null;
+
+function openEditBill(type, id){
+  const record = type==='purchase' ? db.purchases.find(p=>p.id===id) : db.sales.find(s=>s.id===id);
+  if(!record){ alert('Bill not found.'); return; }
+  editBillContext = {
+    type, id, record,
+    partyId: record.partyId||null,
+    newItems: []
+  };
+  currentScreen = 'editBill';
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('screenTitle').textContent = titles.editBill[0];
+  document.getElementById('screenNote').textContent = titles.editBill[1];
+  render();
+}
+function closeEditBill(){
+  const ctx = editBillContext;
+  editBillContext = null;
+  if(ctx) openPrintPreview(ctx.type, ctx.id);
+  else setScreen('dashboard');
+}
+window.openEditBill = openEditBill;
+window.closeEditBill = closeEditBill;
+
+function renderEditBill(){
+  if(!editBillContext) return `<div class="empty">Nothing to edit.</div>`;
+  const { type, record } = editBillContext;
+  const isPurchase = type==='purchase';
+
+  const existingItemsHtml = (record.items||[]).map(it=>`
+    <div class="list-row">
+      <div><div class="li-main">${it.itemName}${it.batch?` (${it.batch})`:''}</div><div class="li-sub">Qty ${it.qty}${it.freeQty?` +${it.freeQty} free`:''} • Rate ${fmt(it.rate)}</div></div>
+    </div>
+  `).join('');
+
+  const newItemsHtml = editBillContext.newItems.map((it,idx)=>{
+    if(isPurchase){
+      return `
+      <div class="item-row-card">
+        <button class="rm" onclick="removeEditNewItem(${idx})">×</button>
+        <div class="field"><label>Item name</label><input value="${it.itemName}" oninput="updateEditNewItem(${idx},'itemName',this.value)"/></div>
+        <div class="row2">
+          <div class="field"><label>Batch no.</label><input value="${it.batch}" oninput="updateEditNewItem(${idx},'batch',this.value)"/></div>
+          <div class="field"><label>Expiry (MM/YY)</label><input value="${it.expiry}" oninput="maskEditExpiry(this,${idx})" placeholder="12/27" maxlength="5"/></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>Purchase qty</label><input type="number" value="${it.qty||''}" placeholder="0" oninput="updateEditNewItem(${idx},'qty',this.value)"/></div>
+          <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty||''}" placeholder="0" oninput="updateEditNewItem(${idx},'freeQty',this.value)"/></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>Rate/unit</label><input type="number" value="${it.rate||''}" placeholder="0" oninput="updateEditNewItem(${idx},'rate',this.value)"/></div>
+          <div class="field"><label>MRP</label><input type="number" value="${it.mrp||''}" placeholder="0" oninput="updateEditNewItem(${idx},'mrp',this.value)"/></div>
+        </div>
+        <div class="field"><label>GST %</label>
+          <select onchange="updateEditNewItem(${idx},'gst',this.value)">
+            ${[0,5,12,18,28].map(g=>`<option value="${g}" ${Number(it.gst)===g?'selected':''}>${g}%</option>`).join('')}
+          </select>
+        </div>
+      </div>`;
+    } else {
+      return `
+      <div class="item-row-card">
+        <button class="rm" onclick="removeEditNewItem(${idx})">×</button>
+        <div class="li-main">${it.itemName} <span style="color:var(--ink-500);font-weight:500;">(${it.batch})</span></div>
+        <div class="row2" style="margin-top:8px;">
+          <div class="field"><label>Sale qty</label><input type="number" value="${it.qty}" onchange="updateEditNewItem(${idx},'qty',this.value)"/></div>
+          <div class="field"><label>Discount %</label><input type="number" value="${it.discount||''}" placeholder="0" onchange="updateEditNewItem(${idx},'discount',this.value)"/></div>
+        </div>
+        <div style="font-size:12px;color:var(--ink-500);">Rate (MRP) ${fmt(it.rate)} • GST ${it.gst}%</div>
+      </div>`;
+    }
+  }).join('');
+
+  const partyOptions = db.parties.filter(p=>p.type===(isPurchase?'supplier':'customer'));
+
+  return `
+    <button class="btn btn-ghost no-print" style="margin-bottom:10px;" onclick="closeEditBill()">← Back to bill</button>
+    <div class="card">
+      <h3>${record.billNo||record.id}</h3>
+      <div class="step">${record.date} • ${isPurchase?record.supplier:record.customer}</div>
+    </div>
+    <div class="card">
+      <h3>Fix ${isPurchase?'supplier':'customer'} link</h3>
+      <div class="field"><label>${isPurchase?'Supplier':'Customer'}</label>
+        <select onchange="editBillContext.partyId=this.value||null;">
+          <option value="">Not linked to a ledger</option>
+          ${partyOptions.map(p=>`<option value="${p.id}" ${editBillContext.partyId===p.id?'selected':''}>${p.name}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Items already on this bill</h3>
+      ${existingItemsHtml || `<div class="empty">No items.</div>`}
+      <div class="step" style="margin-top:8px;">Quantities here can't be changed from this screen — that needs a return/adjustment instead, so stock stays accurate. Use this screen only to add something that was missed.</div>
+    </div>
+    <div class="card">
+      <h3>Add a missed item</h3>
+      ${newItemsHtml || `<div class="empty">Nothing added yet.</div>`}
+      ${isPurchase
+        ? `<button class="btn btn-ghost" onclick="addEditNewItemBlank()">+ Add item row</button>`
+        : `<div class="field"><label>Search stock item</label><input id="editSaleSearch" placeholder="Type item name..." oninput="renderEditSaleSearch(this.value)"/></div><div id="editSaleSearchResults"></div>`
+      }
+    </div>
+    <button class="btn btn-primary" onclick="saveEditBill()">Save changes</button>
+  `;
+}
+
+function addEditNewItemBlank(){
+  editBillContext.newItems.push({itemName:'',batch:'',expiry:'',qty:0,freeQty:0,rate:0,mrp:0,gst:5});
+  render();
+}
+function removeEditNewItem(idx){ editBillContext.newItems.splice(idx,1); render(); }
+function updateEditNewItem(idx,field,val){
+  const strFields = ['itemName','batch','expiry'];
+  editBillContext.newItems[idx][field] = strFields.includes(field) ? val : Number(val);
+}
+function maskEditExpiry(el, idx){
+  let digits = el.value.replace(/[^0-9]/g, '').slice(0, 4);
+  let formatted = digits.length>2 ? digits.slice(0,2)+'/'+digits.slice(2) : digits;
+  el.value = formatted;
+  updateEditNewItem(idx, 'expiry', formatted);
+}
+function renderEditSaleSearch(q){
+  const box = document.getElementById('editSaleSearchResults');
+  const query = (q||'').trim().toLowerCase();
+  if(!query){ box.innerHTML=''; return; }
+  const matches = db.stock.filter(s=>s.qty>0 && s.itemName.toLowerCase().includes(query)).slice(0,20);
+  if(!matches.length){ box.innerHTML = `<div class="empty" style="padding:14px;">No matching stock found.</div>`; return; }
+  box.innerHTML = matches.map(s=>`
+    <div class="list-row" style="cursor:pointer;" onclick="addEditSaleItem('${s.id}')">
+      <div><div class="li-main">${s.itemName}</div><div class="li-sub">Batch ${s.batch} • Qty ${s.qty}</div></div>
+      <div class="li-right" style="color:var(--teal-700);font-weight:700;">Add +</div>
+    </div>
+  `).join('');
+}
+function addEditSaleItem(stockId){
+  const s = db.stock.find(x=>x.id===stockId);
+  if(!s) return;
+  editBillContext.newItems.push({stockId:s.id, itemName:s.itemName, batch:s.batch, qty:1, discount:0, rate:s.mrp, gst:s.gst});
+  document.getElementById('editSaleSearch').value='';
+  render();
+}
+window.addEditNewItemBlank = addEditNewItemBlank;
+window.removeEditNewItem = removeEditNewItem;
+window.updateEditNewItem = updateEditNewItem;
+window.maskEditExpiry = maskEditExpiry;
+window.renderEditSaleSearch = renderEditSaleSearch;
+window.addEditSaleItem = addEditSaleItem;
+
+function saveEditBill(){
+  if(CLOUD_MODE){ saveEditBillCloud(); return; }
+  const { type, id, partyId, newItems } = editBillContext;
+  if(type==='purchase'){
+    const rec = db.purchases.find(p=>p.id===id);
+    if(!rec) return;
+    const valid = newItems.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
+    valid.forEach(it=>{
+      const amt = Number(it.qty)*Number(it.rate);
+      const gstAmt = amt*Number(it.gst)/100;
+      rec.totalAmount = (rec.totalAmount||0) + amt;
+      rec.totalGst = (rec.totalGst||0) + gstAmt;
+      rec.items.push(it);
+      let stockRow = findStock(it.itemName, it.batch);
+      const typedMrp = Number(it.mrp)>0 ? Number(it.mrp) : Number(it.rate)*1.2;
+      if(!stockRow){
+        stockRow = {id: slugId(it.itemName, it.batch), itemName:it.itemName.trim(), batch:it.batch.trim(), expiry:it.expiry, mrp:typedMrp, purchaseRate:Number(it.rate), gst:Number(it.gst), qty:0};
+        db.stock.push(stockRow);
+      }
+      stockRow.qty += Number(it.qty)+Number(it.freeQty);
+    });
+    rec.partyId = partyId;
+    saveDB(db);
+  } else {
+    const rec = db.sales.find(s=>s.id===id);
+    if(!rec) return;
+    for(const it of newItems){
+      const s = db.stock.find(x=>x.id===it.stockId);
+      if(!s || s.qty < Number(it.qty)){ alert(`Not enough stock for ${it.itemName}. Available: ${s?s.qty:0}`); return; }
+    }
+    newItems.forEach(it=>{
+      const gross = Number(it.qty)*Number(it.rate);
+      const disc = gross*Number(it.discount)/100;
+      const net = gross-disc;
+      const taxable = net/(1+Number(it.gst)/100);
+      rec.totalAmount = (rec.totalAmount||0) + net;
+      rec.totalGst = (rec.totalGst||0) + (net-taxable);
+      rec.totalDiscount = (rec.totalDiscount||0) + disc;
+      rec.items.push(it);
+      const s = db.stock.find(x=>x.id===it.stockId);
+      s.qty -= Number(it.qty);
+    });
+    rec.partyId = partyId;
+    saveDB(db);
+  }
+  const ctx = editBillContext;
+  editBillContext = null;
+  openPrintPreview(ctx.type, ctx.id);
+}
+
+async function saveEditBillCloud(){
+  const { type, id, partyId, newItems } = editBillContext;
+  try{
+    if(type==='purchase'){
+      const valid = newItems.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
+      const purchaseRef = fsDB.collection('purchases').doc(id);
+      if(!valid.length){
+        await purchaseRef.update({partyId: partyId||null});
+      } else {
+      const batchWrite = fsDB.batch();
+      let addAmount=0, addGst=0;
+      valid.forEach(it=>{
+        const amt = Number(it.qty)*Number(it.rate);
+        const gstAmt = amt*Number(it.gst)/100;
+        addAmount += amt; addGst += gstAmt;
+        const stockRef = fsDB.collection('stock').doc(slugId(it.itemName, it.batch));
+        const patch = {
+          itemName: it.itemName.trim(), batch: it.batch.trim(),
+          purchaseRate: Number(it.rate), gst: Number(it.gst),
+          mrp: Number(it.mrp)>0 ? Number(it.mrp) : Number(it.rate)*1.2,
+          qty: firebase.firestore.FieldValue.increment(Number(it.qty)+Number(it.freeQty))
+        };
+        if(it.expiry) patch.expiry = it.expiry;
+        batchWrite.set(stockRef, patch, {merge:true});
+      });
+      batchWrite.update(purchaseRef, {
+        items: firebase.firestore.FieldValue.arrayUnion(...valid),
+        totalAmount: firebase.firestore.FieldValue.increment(addAmount),
+        totalGst: firebase.firestore.FieldValue.increment(addGst),
+        partyId: partyId||null
+      });
+      await batchWrite.commit();
+      }
+    } else {
+      const saleRef = fsDB.collection('sales').doc(id);
+      if(!newItems.length){
+        await saleRef.update({partyId: partyId||null});
+      } else {
+      await fsDB.runTransaction(async (tx)=>{
+        const refs = newItems.map(it=>fsDB.collection('stock').doc(it.stockId));
+        const snaps = await Promise.all(refs.map(r=>tx.get(r)));
+        snaps.forEach((snap,i)=>{
+          const it = newItems[i];
+          const avail = snap.exists ? (snap.data().qty||0) : 0;
+          if(Number(it.qty) > avail) throw new Error(`Not enough stock for ${it.itemName}. Available: ${avail}`);
+        });
+        let addAmount=0, addGst=0, addDisc=0;
+        snaps.forEach((snap,i)=>{
+          const it = newItems[i];
+          tx.update(refs[i], {qty: firebase.firestore.FieldValue.increment(-Number(it.qty))});
+          const gross = Number(it.qty)*Number(it.rate);
+          const disc = gross*Number(it.discount)/100;
+          const net = gross-disc;
+          const taxable = net/(1+Number(it.gst)/100);
+          addAmount += net; addGst += (net-taxable); addDisc += disc;
+        });
+        tx.update(saleRef, {
+          items: firebase.firestore.FieldValue.arrayUnion(...newItems),
+          totalAmount: firebase.firestore.FieldValue.increment(addAmount),
+          totalGst: firebase.firestore.FieldValue.increment(addGst),
+          totalDiscount: firebase.firestore.FieldValue.increment(addDisc),
+          partyId: partyId||null
+        });
+      });
+      }
+    }
+    const ctx = editBillContext;
+    editBillContext = null;
+    openPrintPreview(ctx.type, ctx.id);
+  }catch(e){
+    console.error(e);
+    alert('Could not save changes: '+e.message);
+  }
+}
+window.saveEditBill = saveEditBill;
 
 function attachHandlers(){
   const photoInput = document.getElementById('photoInput');
