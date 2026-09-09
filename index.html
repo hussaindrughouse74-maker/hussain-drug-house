@@ -309,35 +309,52 @@ function nextId(prefix){
   db.seqs[prefix] += 1;
   return id;
 }
-function formatBillNo(n){ return 'HDH-' + String(n).padStart(5,'0'); }
-/* One shared sequence across purchases, sales and returns — HDH-00001, HDH-00002...
-   Local mode: reuses the same per-prefix counter as everything else, just under
-   one shared 'HDH' key. Cloud mode: allocated inside a small Firestore
-   transaction so two devices can never get the same number at the same time. */
-function nextBillNoLocal(){
-  if(!db.seqs['HDH']) db.seqs['HDH'] = 1;
-  const n = db.seqs['HDH'];
-  db.seqs['HDH'] += 1;
-  return formatBillNo(n);
+function formatBillNo(kind, n){
+  const prefix = kind==='purchase' ? 'HDHP' : 'HDHS';
+  return prefix + String(n).padStart(5,'0');
 }
-async function nextBillNoCloud(){
-  const counterRef = fsDB.collection('meta').doc('billCounter');
+/* Separate sequences: HDHP-prefixed for purchases (and purchase returns),
+   HDHS-prefixed for sales (and sale returns). Local mode: per-kind counter.
+   Cloud mode: allocated inside a small Firestore transaction so two
+   devices can never get the same number at the same time. */
+function nextBillNoLocal(kind){
+  const key = 'HDHNO_'+kind;
+  if(!db.seqs[key]) db.seqs[key] = 1;
+  const n = db.seqs[key];
+  db.seqs[key] += 1;
+  return formatBillNo(kind, n);
+}
+async function nextBillNoCloud(kind){
+  const counterRef = fsDB.collection('meta').doc('billCounter_'+kind);
   return await fsDB.runTransaction(async (tx)=>{
     const snap = await tx.get(counterRef);
     const current = snap.exists ? (snap.data().seq||0) : 0;
     const next = current+1;
     tx.set(counterRef, {seq: next}, {merge:true});
-    return formatBillNo(next);
+    return formatBillNo(kind, next);
   });
 }
-async function nextBillNo(){
-  return CLOUD_MODE ? await nextBillNoCloud() : nextBillNoLocal();
+async function nextBillNo(kind){
+  return CLOUD_MODE ? await nextBillNoCloud(kind) : nextBillNoLocal(kind);
 }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function fmt(n){ return '₹' + (Math.round(n*100)/100).toLocaleString('en-IN'); }
 function daysUntil(dateStr){
-  const d = new Date(dateStr + '-01');
-  const diff = (d - new Date());
+  // Expiry is stored as "MM/YY" (the purchase form's format), but this also
+  // accepts older "MM/YYYY" entries. Building a Date by string-concatenation
+  // (the old approach) is unreliable across browsers/formats — it silently
+  // misparsed correctly-formatted dates as Invalid Date, and misparsed
+  // shorter "MM/YY" entries as the year 2001. This parses the two parts
+  // by hand instead, so it works regardless of engine date-parsing quirks.
+  if(!dateStr) return Infinity;
+  const parts = String(dateStr).split('/');
+  if(parts.length !== 2) return Infinity;
+  let mm = parseInt(parts[0], 10);
+  let yyyy = parseInt(parts[1], 10);
+  if(!mm || !yyyy || mm<1 || mm>12) return Infinity;
+  if(yyyy < 100) yyyy += 2000; // gracefully handle older 2-digit-year entries already saved
+  const d = new Date(yyyy, mm, 0); // last day of that expiry month
+  const diff = d - new Date();
   return Math.round(diff / (1000*60*60*24));
 }
 
@@ -528,7 +545,7 @@ async function savePurchaseCloud(){
     if(purchaseDraft.photo){
       photoData = await ensureFirestoreSafePhoto(purchaseDraft.photo);
     }
-    const billNo = await nextBillNoCloud();
+    const billNo = await nextBillNoCloud('purchase');
     const batchWrite = fsDB.batch();
     let totalAmount=0, totalGst=0;
     valid.forEach(it=>{
@@ -567,7 +584,7 @@ async function saveSaleCloud(){
   if(!saleDraft.items.length){ alert('Add at least one item to the bill.'); return; }
   const saleRefHolder = {ref:null};
   try{
-    const billNo = await nextBillNoCloud();
+    const billNo = await nextBillNoCloud('sale');
     await fsDB.runTransaction(async (tx)=>{
       const refs = saleDraft.items.map(it=>fsDB.collection('stock').doc(it.stockId));
       const snaps = await Promise.all(refs.map(r=>tx.get(r)));
@@ -600,7 +617,7 @@ async function saveSaleCloud(){
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
     });
-    saleDraft = {customer:'', items:[], partyId:null, paidInFull:true, amountPaid:0};
+    saleDraft = {customer:'', items:[], partyId:null, paidInFull:true, amountPaid:0}; showNewCustomerForm=false;
     openPrintPreview('sale', saleRefHolder.ref.id);
     return;
   }catch(e){
@@ -643,6 +660,7 @@ window.importBackup = importBackup;
 let currentScreen = 'dashboard';
 let purchaseDraft = { photo:null, supplier:'', items:[], partyId:null, paidInFull:true, amountPaid:0 };
 let saleDraft = { customer:'', items:[], partyId:null, paidInFull:true, amountPaid:0 };
+let showNewCustomerForm = false;
 
 const titles = {
   dashboard:['Dashboard','Today\'s summary at a glance'],
@@ -688,12 +706,12 @@ function renderDashboard(){
   const todayPurchases = db.purchases.filter(p=>p.date===today);
   const salesTotal = todaySales.reduce((a,s)=>a+s.totalAmount,0);
   const purchaseTotal = todayPurchases.reduce((a,p)=>a+p.totalAmount,0);
-  const lowStock = db.stock.filter(s=>s.qty>0 && s.qty<=10);
+  const lowStock = db.stock.filter(s=>s.qty>0 && s.qty<=1);
   const nearExpiry = db.stock.filter(s=> s.qty>0 && daysUntil(s.expiry) <= 90 && daysUntil(s.expiry) >= 0);
   const outOfStock = db.stock.filter(s=>s.qty<=0);
 
   let alerts = '';
-  if(lowStock.length) alerts += `<div class="alert amber"><span class="a-icon">⚠</span><span>${lowStock.length} item(s) running low (≤10 units) — check Stock tab.</span></div>`;
+  if(lowStock.length) alerts += `<div class="alert amber"><span class="a-icon">⚠</span><span>${lowStock.length} item(s) running low (1 unit left) — check Stock tab.</span></div>`;
   if(nearExpiry.length) alerts += `<div class="alert red"><span class="a-icon">⏱</span><span>${nearExpiry.length} batch(es) expiring within 90 days.</span></div>`;
   if(outOfStock.length) alerts += `<div class="alert amber"><span class="a-icon">✕</span><span>${outOfStock.length} item(s) are out of stock.</span></div>`;
   if(!alerts) alerts = `<div class="alert" style="background:#E4F2EE;color:var(--teal-700);"><span class="a-icon">✓</span><span>No stock alerts right now.</span></div>`;
@@ -766,11 +784,11 @@ function renderPurchase(){
       </div>
       <div class="row2">
         <div class="field"><label>Batch no.</label><input value="${it.batch}" oninput="updatePurchaseItem(${idx},'batch',this.value)"/></div>
-        <div class="field"><label>Expiry (MM/YYYY)</label><input value="${it.expiry}" oninput="updatePurchaseItem(${idx},'expiry',this.value)" placeholder="12/2027"/></div>
+        <div class="field"><label>Expiry (MM/YY)</label><input value="${it.expiry}" oninput="maskExpiryInput(this,${idx})" placeholder="12/27" inputmode="numeric" maxlength="5"/></div>
       </div>
       <div class="row2">
-        <div class="field"><label>Purchase qty</label><input type="number" value="${it.qty}" oninput="updatePurchaseItem(${idx},'qty',this.value)"/></div>
-        <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty}" oninput="updatePurchaseItem(${idx},'freeQty',this.value)"/></div>
+        <div class="field"><label>Purchase qty</label><input type="number" value="${it.qty||''}" placeholder="0" oninput="updatePurchaseItem(${idx},'qty',this.value)"/></div>
+        <div class="field"><label>Free qty</label><input type="number" value="${it.freeQty||''}" placeholder="0" oninput="updatePurchaseItem(${idx},'freeQty',this.value)"/></div>
       </div>
       <div class="row2">
         <div class="field"><label>Rate/unit (your cost)</label><input type="number" value="${it.rate||''}" placeholder="0" oninput="updatePurchaseItem(${idx},'rate',this.value)"/></div>
@@ -857,6 +875,18 @@ function updatePurchaseItem(idx,field,val){
     // re-render totals without losing focus is tricky in vanilla; keep simple, re-render on blur-like fields only
   }
 }
+/* As the user types digits for expiry, auto-insert "/" after the month
+   (2 digits), so typing "1227" becomes "12/27" without them needing
+   to type the slash themselves. Format is MM/YY (2-digit year). */
+function maskExpiryInput(el, idx){
+  let digits = el.value.replace(/[^0-9]/g, '').slice(0, 4);
+  let formatted = digits;
+  if(digits.length > 2){
+    formatted = digits.slice(0,2) + '/' + digits.slice(2);
+  }
+  el.value = formatted;
+  updatePurchaseItem(idx, 'expiry', formatted);
+}
 function bumpFree(idx, n){
   purchaseDraft.items[idx].freeQty = (Number(purchaseDraft.items[idx].freeQty)||0) + n;
   render();
@@ -866,7 +896,7 @@ function savePurchase(){
   const valid = purchaseDraft.items.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
   if(!valid.length){ alert('Add at least one item with name, batch and quantity before saving.'); return; }
   const id = nextId('PUR');
-  const billNo = nextBillNoLocal();
+  const billNo = nextBillNoLocal('purchase');
   let totalAmount=0, totalGst=0;
   valid.forEach(it=>{
     const amt = Number(it.qty)*Number(it.rate);
@@ -980,7 +1010,7 @@ function savePurchaseReturn(){
     s.qty -= Number(it.qty);
   });
   const id = nextId('PRET');
-  const billNo = nextBillNoLocal();
+  const billNo = nextBillNoLocal('purchase');
   db.purchaseReturns.push({id, billNo, date:todayStr(), items:valid, totalAmount, totalGst});
   saveDB(db);
   purchaseReturnDraft = {items:[]};
@@ -991,7 +1021,7 @@ async function savePurchaseReturnCloud(){
   if(!valid.length){ alert('Add at least one item to return.'); return; }
   try{
     const retRef = fsDB.collection('purchaseReturns').doc();
-    const billNo = await nextBillNoCloud();
+    const billNo = await nextBillNoCloud('purchase');
     await fsDB.runTransaction(async (tx)=>{
       const refs = valid.map(it=>fsDB.collection('stock').doc(it.stockId));
       const snaps = await Promise.all(refs.map(r=>tx.get(r)));
@@ -1086,11 +1116,20 @@ function renderSales(){
         <input value="${saleDraft.customer}" oninput="saleDraft.customer=this.value" placeholder="Walk-in (default) or type a name"/>
       </div>
       <div class="field"><label>Link to a customer ledger (optional, for credit sales)</label>
-        <select onchange="saleDraft.partyId=this.value||null; if(this.value){const p=db.parties.find(x=>x.id===this.value); if(p) saleDraft.customer=p.name;} render();">
+        <select onchange="if(this.value==='__new__'){ showNewCustomerForm=true; render(); } else { saleDraft.partyId=this.value||null; showNewCustomerForm=false; if(this.value){const p=db.parties.find(x=>x.id===this.value); if(p) saleDraft.customer=p.name;} render(); }">
           <option value="">Cash sale — don't track on a ledger</option>
           ${db.parties.filter(p=>p.type==='customer').map(p=>`<option value="${p.id}" ${saleDraft.partyId===p.id?'selected':''}>${p.name}</option>`).join('')}
+          <option value="__new__">+ New customer for credit</option>
         </select>
       </div>
+      ${showNewCustomerForm ? `
+      <div class="field"><label>New customer name</label><input id="quickCustName" placeholder="Customer name"/></div>
+      <div class="row2">
+        <div class="field"><label>Phone</label><input id="quickCustPhone"/></div>
+        <div class="field"><label>Address</label><input id="quickCustAddress"/></div>
+      </div>
+      <button class="btn btn-primary" onclick="createQuickCustomer()">Create & select customer</button>
+      ` : ''}
       ${saleDraft.partyId ? `
       <div class="row2">
         <div class="field"><label>Paid in full?</label>
@@ -1190,7 +1229,7 @@ function saveSale(){
     }
   }
   const id = nextId('SAL');
-  const billNo = nextBillNoLocal();
+  const billNo = nextBillNoLocal('sale');
   let totalNet=0, totalGst=0, totalDiscount=0;
   saleDraft.items.forEach(it=>{
     const gross = Number(it.qty)*Number(it.rate);
@@ -1206,7 +1245,7 @@ function saveSale(){
   const saleAmountPaid = saleDraft.partyId ? (saleDraft.paidInFull!==false ? fullSaleTotal : Number(saleDraft.amountPaid)||0) : fullSaleTotal;
   db.sales.push({id, billNo, date:todayStr(), customer:saleDraft.customer||'Walk-in', items:saleDraft.items, totalAmount:fullSaleTotal, totalGst, totalDiscount, partyId:saleDraft.partyId||null, amountPaid:saleAmountPaid});
   saveDB(db);
-  saleDraft = {customer:'', items:[], partyId:null, paidInFull:true, amountPaid:0};
+  saleDraft = {customer:'', items:[], partyId:null, paidInFull:true, amountPaid:0}; showNewCustomerForm=false;
   openPrintPreview('sale', id);
 }
 
@@ -1308,7 +1347,7 @@ function saveSaleReturn(){
     if(s) s.qty += Number(it.qty);
   });
   const id = nextId('SRET');
-  const billNo = nextBillNoLocal();
+  const billNo = nextBillNoLocal('sale');
   db.saleReturns.push({id, billNo, date:todayStr(), refSaleId:saleReturnDraft.sale.billNo||saleReturnDraft.sale.id, items:valid, totalAmount, totalGst});
   saveDB(db);
   saleReturnDraft = {sale:null, items:[]};
@@ -1320,7 +1359,7 @@ async function saveSaleReturnCloud(){
   try{
     const batchWrite = fsDB.batch();
     const retRef = fsDB.collection('saleReturns').doc();
-    const billNo = await nextBillNoCloud();
+    const billNo = await nextBillNoCloud('sale');
     let totalAmount=0, totalGst=0;
     valid.forEach(it=>{
       const amt = Number(it.qty)*Number(it.rate);
@@ -1349,7 +1388,7 @@ window.saveSaleReturn = saveSaleReturn;
 let stockFilter = 'all';
 function renderStock(){
   let rows = db.stock.filter(s=>s.qty>0 || stockFilter==='out');
-  if(stockFilter==='low') rows = rows.filter(s=>s.qty>0 && s.qty<=10);
+  if(stockFilter==='low') rows = rows.filter(s=>s.qty>0 && s.qty<=1);
   if(stockFilter==='exp') rows = rows.filter(s=>daysUntil(s.expiry)<=90);
   if(stockFilter==='out') rows = db.stock.filter(s=>s.qty<=0);
 
@@ -1360,7 +1399,8 @@ function renderStock(){
     const dLeft = daysUntil(s.expiry);
     let tag = '<span class="tag ok">In stock</span>';
     if(s.qty<=0) tag = '<span class="tag low">Out of stock</span>';
-    else if(s.qty<=10) tag = '<span class="tag low">Low stock</span>';
+    else if(s.qty<=1) tag = '<span class="tag low">Low stock</span>';
+    else if(dLeft<0) tag = '<span class="tag low">Expired</span>';
     else if(dLeft<=90) tag = '<span class="tag exp">Expiring soon</span>';
     return `
     <div class="list-row">
@@ -1385,9 +1425,10 @@ function renderStock(){
 
 /* ===================== REPORTS SCREEN ===================== */
 let reportMode = 'daily';
+let selectedMonth = new Date().toISOString().slice(0,7); // YYYY-MM, defaults to current month
 function renderReports(){
   const today = todayStr();
-  const month = today.slice(0,7);
+  const month = reportMode==='monthly' ? selectedMonth : today.slice(0,7);
 
   const sales = reportMode==='daily' ? db.sales.filter(s=>s.date===today) : db.sales.filter(s=>s.date.startsWith(month));
   const purchases = reportMode==='daily' ? db.purchases.filter(p=>p.date===today) : db.purchases.filter(p=>p.date.startsWith(month));
@@ -1396,48 +1437,49 @@ function renderReports(){
 
   const salesTotal = sales.reduce((a,s)=>a+s.totalAmount,0);
   const salesGst = sales.reduce((a,s)=>a+s.totalGst,0);
-  const purchaseTotal = purchases.reduce((a,p)=>a+p.totalAmount+p.totalGst,0);
-  const purchaseGst = purchases.reduce((a,p)=>a+p.totalGst,0);
+  const purchaseTaxable = purchases.reduce((a,p)=>a+(p.totalAmount||0),0);
+  const purchaseGst = purchases.reduce((a,p)=>a+(p.totalGst||0),0);
+  const purchaseTotal = purchaseTaxable + purchaseGst;
   const saleReturnTotal = saleReturns.reduce((a,r)=>a+(r.totalAmount||0),0);
   const purchaseReturnTotal = purchaseReturns.reduce((a,r)=>a+(r.totalAmount||0)+(r.totalGst||0),0);
   const netSales = salesTotal - saleReturnTotal;
-  const netPurchases = purchaseTotal - purchaseReturnTotal;
 
   return `
     <div class="segment">
       <button class="${reportMode==='daily'?'active':''}" onclick="reportMode='daily';render()">Daily</button>
       <button class="${reportMode==='monthly'?'active':''}" onclick="reportMode='monthly';render()">Monthly</button>
     </div>
+    ${reportMode==='monthly' ? `<div class="field"><label>Month</label><input type="month" value="${selectedMonth}" onchange="selectedMonth=this.value;render()"/></div>` : ''}
     <div class="stat-grid">
-      <div class="stat"><div class="num">${fmt(salesTotal)}</div><div class="lbl">Gross sales</div></div>
-      <div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Gross purchases</div></div>
+      <div class="stat"><div class="num">${fmt(salesTotal)}</div><div class="lbl">Sales (incl. GST)</div></div>
+      <div class="stat"><div class="num">${fmt(purchaseTaxable)}</div><div class="lbl">Purchases — taxable</div></div>
+      <div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Purchases — total (incl. GST)</div></div>
       <div class="stat"><div class="num">${fmt(saleReturnTotal)}</div><div class="lbl">Sale returns</div></div>
       <div class="stat"><div class="num">${fmt(purchaseReturnTotal)}</div><div class="lbl">Purchase returns</div></div>
       <div class="stat"><div class="num">${fmt(netSales)}</div><div class="lbl">Net sales</div></div>
-      <div class="stat"><div class="num">${fmt(netPurchases)}</div><div class="lbl">Net purchases</div></div>
       <div class="stat"><div class="num">${fmt(salesGst)}</div><div class="lbl">GST on sales</div></div>
       <div class="stat"><div class="num">${fmt(purchaseGst)}</div><div class="lbl">GST on purchases</div></div>
     </div>
     <div class="card">
-      <h3>${reportMode==='daily'?"Today's":"This month's"} sale bills (${sales.length})</h3>
+      <h3>${reportMode==='daily'?"Today's":('Month of '+month)} sale bills (${sales.length})</h3>
       ${sales.length ? sales.map(s=>`
         <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('sale','${s.id}')"><div><div class="li-main">${s.billNo||s.id}</div><div class="li-sub">${s.date} • ${s.customer}</div></div><div class="li-right">${fmt(s.totalAmount)}</div></div>
       `).join('') : `<div class="empty">No sales recorded.</div>`}
     </div>
     <div class="card">
-      <h3>${reportMode==='daily'?"Today's":"This month's"} purchases (${purchases.length})</h3>
+      <h3>${reportMode==='daily'?"Today's":('Month of '+month)} purchases (${purchases.length})</h3>
       ${purchases.length ? purchases.map(p=>`
         <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('purchase','${p.id}')"><div><div class="li-main">${p.billNo||p.id}</div><div class="li-sub">${p.date} • ${p.supplier}</div></div><div class="li-right">${fmt(p.totalAmount+p.totalGst)}</div></div>
       `).join('') : `<div class="empty">No purchases recorded.</div>`}
     </div>
     <div class="card">
-      <h3>${reportMode==='daily'?"Today's":"This month's"} sale returns (${saleReturns.length})</h3>
+      <h3>${reportMode==='daily'?"Today's":('Month of '+month)} sale returns (${saleReturns.length})</h3>
       ${saleReturns.length ? saleReturns.map(r=>`
         <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('saleReturn','${r.id}')"><div><div class="li-main">${r.billNo||r.id}</div><div class="li-sub">${r.date} • against ${r.refSaleId}</div></div><div class="li-right">${fmt(r.totalAmount)}</div></div>
       `).join('') : `<div class="empty">No sale returns recorded.</div>`}
     </div>
     <div class="card">
-      <h3>${reportMode==='daily'?"Today's":"This month's"} purchase returns (${purchaseReturns.length})</h3>
+      <h3>${reportMode==='daily'?"Today's":('Month of '+month)} purchase returns (${purchaseReturns.length})</h3>
       ${purchaseReturns.length ? purchaseReturns.map(r=>`
         <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('purchaseReturn','${r.id}')"><div><div class="li-main">${r.billNo||r.id}</div><div class="li-sub">${r.date} • ${r.items.length} item(s)</div></div><div class="li-right">${fmt(r.totalAmount+r.totalGst)}</div></div>
       `).join('') : `<div class="empty">No purchase returns recorded.</div>`}
@@ -1631,6 +1673,12 @@ function renderPartiesList(){
         <div class="field"><label>Phone (optional)</label><input id="newPartyPhone"/></div>
         <div class="field"><label>Opening balance</label><input id="newPartyOpening" type="number" value="0"/></div>
       </div>
+      <div class="field"><label>Address (optional)</label><input id="newPartyAddress" placeholder="e.g. Kazir Bazar, Karimganj, Assam"/></div>
+      <div class="row2">
+        <div class="field"><label>GSTIN (optional)</label><input id="newPartyGstin" placeholder="18ADOPH1433M1ZB"/></div>
+        <div class="field"><label>DL Number (optional)</label><input id="newPartyDl" placeholder="KMJ/RP/176/177"/></div>
+      </div>
+      <div class="field"><label>PAN Number (optional)</label><input id="newPartyPan" placeholder="ADOPH1433M"/></div>
       <button class="btn btn-primary" onclick="saveParty()">+ Add ${partyFormType}</button>
     </div>
     <div class="card">
@@ -1648,7 +1696,11 @@ function saveParty(){
   if(!name){ alert('Enter a name.'); return; }
   const phone = document.getElementById('newPartyPhone').value.trim();
   const opening = Number(document.getElementById('newPartyOpening').value)||0;
-  const party = {name, phone, type:partyFormType, openingBalance:opening};
+  const address = document.getElementById('newPartyAddress').value.trim();
+  const gstin = document.getElementById('newPartyGstin').value.trim();
+  const dlNumber = document.getElementById('newPartyDl').value.trim();
+  const panNumber = document.getElementById('newPartyPan').value.trim();
+  const party = {name, phone, type:partyFormType, openingBalance:opening, address, gstin, dlNumber, panNumber};
   if(CLOUD_MODE){
     fsDB.collection('parties').add(Object.assign({}, party, {createdAt:firebase.firestore.FieldValue.serverTimestamp()}))
       .catch(e=>alert('Could not save: '+e.message));
@@ -1660,6 +1712,37 @@ function saveParty(){
   }
 }
 window.saveParty = saveParty;
+
+/* Quick customer creation from the Sale screen — for a credit sale to a
+   customer who doesn't exist in the ledger yet. Only Name, Phone and
+   Address, since that's all a credit customer needs; the fuller party
+   form (GSTIN/DL/PAN) stays on the main Parties screen for suppliers. */
+function createQuickCustomer(){
+  const name = document.getElementById('quickCustName').value.trim();
+  if(!name){ alert('Enter a customer name.'); return; }
+  const phone = document.getElementById('quickCustPhone').value.trim();
+  const address = document.getElementById('quickCustAddress').value.trim();
+  const party = {name, phone, address, type:'customer', openingBalance:0};
+  if(CLOUD_MODE){
+    fsDB.collection('parties').add(Object.assign({}, party, {createdAt:firebase.firestore.FieldValue.serverTimestamp()}))
+      .then(ref=>{
+        saleDraft.partyId = ref.id;
+        saleDraft.customer = name;
+        showNewCustomerForm = false;
+        render();
+      })
+      .catch(e=>alert('Could not save: '+e.message));
+  } else {
+    party.id = nextId('PTY');
+    db.parties.push(party);
+    saveDB(db);
+    saleDraft.partyId = party.id;
+    saleDraft.customer = name;
+    showNewCustomerForm = false;
+    render();
+  }
+}
+window.createQuickCustomer = createQuickCustomer;
 
 function renderPartyDetail(){
   const party = db.parties.find(p=>p.id===openPartyId);
@@ -1679,6 +1762,12 @@ function renderPartyDetail(){
     <div class="card">
       <h3>${party.name}</h3>
       <div class="step">${party.phone||'No phone on file'}</div>
+      ${party.address ? `<div class="step">${party.address}</div>` : ''}
+      ${(party.gstin || party.dlNumber || party.panNumber) ? `<div class="step">
+        ${party.gstin ? `GSTIN: ${party.gstin}<br>` : ''}
+        ${party.dlNumber ? `DL No: ${party.dlNumber}<br>` : ''}
+        ${party.panNumber ? `PAN: ${party.panNumber}` : ''}
+      </div>` : ''}
       <div class="stat" style="margin-top:10px;">
         <div class="num" style="color:${bal>0?'var(--red-700)':'var(--teal-700)'};">${fmt(Math.abs(bal))}</div>
         <div class="lbl">${bal>0 ? (isSupplier?'You owe them':'They owe you') : 'Settled up'}</div>
@@ -1991,7 +2080,7 @@ async function extractTableFromPhoto(){
       if(expiryMatch){
         const mm = expiryMatch[1].padStart(2,'0');
         let yy = expiryMatch[2];
-        if(yy.length===2) yy = '20'+yy;
+        if(yy.length>2) yy = yy.slice(-2); // keep last 2 digits — field format is MM/YY
         expiry = mm+'/'+yy;
       }
       parsed.push({
