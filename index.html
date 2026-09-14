@@ -577,6 +577,10 @@ function initCloudIfConfigured(){
         db.auditLog = [];
         db.staff = [];
         db.staffLedger = [];
+        // No listener refreshes these for staff, so leftover local data would
+        // otherwise linger on screen and expose what you paid the distributor.
+        db.purchases = [];
+        db.purchaseReturns = [];
       }
       updateCloudBadge();
       attachCloudListeners();
@@ -856,7 +860,7 @@ function renderExpiryAlert(){
   const rows = db.stock
     .filter(s=> s.qty>0)
     .map(s=>({s, days: daysUntil(s.expiry)}))
-    .filter(x=> x.days!==null && x.days <= expiryWindowDays)
+    .filter(x=> isFinite(x.days) && x.days <= expiryWindowDays)
     .sort((a,b)=> a.days-b.days);
   const expired = rows.filter(x=>x.days < 0);
   const actionable = rows.filter(x=>x.days >= 0);
@@ -1416,14 +1420,14 @@ function renderDashboard(){
 
   return `
     <div class="stat-grid">
-      <div class="stat" style="cursor:pointer;" onclick="openParties()"><div class="num" style="color:var(--red-700);">${fmt(totalToPay())}</div><div class="lbl">To Pay (suppliers)</div></div>
+      ${isOwner() ? `<div class="stat" style="cursor:pointer;" onclick="openParties()"><div class="num" style="color:var(--red-700);">${fmt(totalToPay())}</div><div class="lbl">To Pay (suppliers)</div></div>` : ''}
       <div class="stat" style="cursor:pointer;" onclick="openParties()"><div class="num" style="color:var(--teal-700);">${fmt(totalToCollect())}</div><div class="lbl">To Collect (customers)</div></div>
-      <div class="stat"><div class="num">${fmt(stockValue())}</div><div class="lbl">Stock value</div></div>
+      ${isOwner() ? `<div class="stat"><div class="num">${fmt(stockValue())}</div><div class="lbl">Stock value</div></div>` : ''}
       <div class="stat"><div class="num">${fmt(thisWeekSales())}</div><div class="lbl">This week's sale</div></div>
     </div>
     <div class="stat-grid" style="margin-top:10px;">
       <div class="stat"><div class="num">${fmt(salesTotal)}</div><div class="lbl">Sales today</div></div>
-      <div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Purchases today</div></div>
+      ${isOwner() ? `<div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Purchases today</div></div>` : ''}
       <div class="stat"><div class="num">${todaySales.length}</div><div class="lbl">Bills today</div></div>
       <div class="stat"><div class="num">${db.stock.filter(s=>s.qty>0).length}</div><div class="lbl">Items in stock</div></div>
     </div>
@@ -2167,13 +2171,13 @@ function renderReports(){
     ${reportMode==='monthly' ? `<div class="field"><label>Month</label><input type="month" value="${selectedMonth}" onchange="selectedMonth=this.value;render()"/></div>` : ''}
     <div class="stat-grid">
       <div class="stat"><div class="num">${fmt(salesTotal)}</div><div class="lbl">Sale (incl. GST)</div></div>
-      <div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Purchase (net, incl. GST)</div></div>
+      ${isOwner() ? `<div class="stat"><div class="num">${fmt(purchaseTotal)}</div><div class="lbl">Purchase (net, incl. GST)</div></div>` : ""}
       <div class="stat"><div class="num">${fmt(netSales)}</div><div class="lbl">Net sale</div></div>
-      <div class="stat"><div class="num">${fmt(purchaseTaxable)}</div><div class="lbl">Purchase — taxable</div></div>
+      ${isOwner() ? `<div class="stat"><div class="num">${fmt(purchaseTaxable)}</div><div class="lbl">Purchase — taxable</div></div>` : ""}
       <div class="stat"><div class="num">${fmt(salesGst)}</div><div class="lbl">GST on sale</div></div>
-      <div class="stat"><div class="num">${fmt(purchaseGst)}</div><div class="lbl">GST on purchase</div></div>
+      ${isOwner() ? `<div class="stat"><div class="num">${fmt(purchaseGst)}</div><div class="lbl">GST on purchase</div></div>` : ""}
       <div class="stat"><div class="num">${fmt(saleReturnTotal)}</div><div class="lbl">Sale return</div></div>
-      <div class="stat"><div class="num">${fmt(purchaseReturnTotal)}</div><div class="lbl">Purchase return</div></div>
+      ${isOwner() ? `<div class="stat"><div class="num">${fmt(purchaseReturnTotal)}</div><div class="lbl">Purchase return</div></div>` : ""}
     </div>
     <div class="card">
       <h3>${reportMode==='daily'?"Today's":('Month of '+month)} sale bills (${sales.length})</h3>
@@ -2181,24 +2185,26 @@ function renderReports(){
         <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('sale','${s.id}')"><div><div class="li-main">${s.billNo||s.id}</div><div class="li-sub">${s.date} • ${s.customer}</div></div><div class="li-right">${fmt(s.totalAmount)}</div></div>
       `).join('') : `<div class="empty">No sales recorded.</div>`}
     </div>
+    ${isOwner() ? `
     <div class="card">
       <h3>${reportMode==='daily'?"Today's":('Month of '+month)} purchases (${purchases.length})</h3>
       ${purchases.length ? purchases.map(p=>`
         <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('purchase','${p.id}')"><div><div class="li-main">${p.billNo||p.id}</div><div class="li-sub">${p.date} • ${p.supplier}</div></div><div class="li-right">${fmt(p.totalAmount+p.totalGst)}</div></div>
       `).join('') : `<div class="empty">No purchases recorded.</div>`}
-    </div>
+    </div>` : ''}
     <div class="card">
       <h3>${reportMode==='daily'?"Today's":('Month of '+month)} sale returns (${saleReturns.length})</h3>
       ${saleReturns.length ? saleReturns.map(r=>`
         <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('saleReturn','${r.id}')"><div><div class="li-main">${r.billNo||r.id}</div><div class="li-sub">${r.date} • against ${r.refSaleId}</div></div><div class="li-right">${fmt(r.totalAmount)}</div></div>
       `).join('') : `<div class="empty">No sale returns recorded.</div>`}
     </div>
+    ${isOwner() ? `
     <div class="card">
       <h3>${reportMode==='daily'?"Today's":('Month of '+month)} purchase returns (${purchaseReturns.length})</h3>
       ${purchaseReturns.length ? purchaseReturns.map(r=>`
         <div class="list-row" style="cursor:pointer;" onclick="openPrintPreview('purchaseReturn','${r.id}')"><div><div class="li-main">${r.billNo||r.id}</div><div class="li-sub">${r.date} • ${r.items.length} item(s)</div></div><div class="li-right">${fmt(r.totalAmount+r.totalGst)}</div></div>
       `).join('') : `<div class="empty">No purchase returns recorded.</div>`}
-    </div>
+    </div>` : ''}
     <div class="step" style="margin-top:4px;">Tap any row above to view or reprint that document.</div>
     ${isOwner() ? `
     <div class="card">
