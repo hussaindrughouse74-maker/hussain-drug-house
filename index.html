@@ -99,7 +99,8 @@
   }
   .btn-primary{background:var(--teal-700);color:var(--white);}
   .btn-primary:active{background:var(--teal-900);}
-  .btn-ghost{background:var(--white);color:var(--teal-700);border:1.5px solid var(--teal-700);}
+  .btn-ghost{background:var(--teal-700);color:var(--white);border:1.5px solid var(--teal-700);}
+  .btn-ghost:active{background:var(--teal-900);}
   .btn-danger{background:var(--red-100);color:var(--red-700);border:1.5px solid #F0C6C3;}
   .btn-sm{padding:7px 10px;font-size:12.5px;width:auto;border-radius:8px;}
   .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
@@ -1433,18 +1434,23 @@ function renderDashboard(){
     <div class="card">
       <h3>Quick actions</h3>
       <div style="display:flex;gap:8px;">
-        <button class="btn btn-ghost" onclick="openParties()">👥 Parties</button>
-        ${isOwner() ? `<button class="btn btn-primary" onclick="setScreen('purchase')">+ Purchase</button>` : ''}
-        <button class="btn btn-ghost" onclick="setScreen('sales')">+ Sale</button>
-        <button class="btn btn-ghost" onclick="setScreen('expiryAlert')">⏱ Expiry returns</button>
-        <button class="btn btn-ghost" onclick="setScreen('addExpense')">💵 Add Expense</button>
-        <button class="btn btn-ghost" onclick="setScreen('reminders')">🔔 Payment reminders</button>
-        ${isOwner() ? `<button class="btn btn-ghost" onclick="setScreen('shopSettings')">🏪 Shop details</button>
-        <button class="btn btn-ghost" onclick="setScreen('users')">👥 Users &amp; roles</button>
-        <button class="btn btn-ghost" onclick="setScreen('auditLog')">📋 Activity log</button>
-        <button class="btn btn-ghost" onclick="setScreen('staffList')">👷 Staff Ledger</button>` : ''}
-        ${CLOUD_MODE ? `<button class="btn btn-ghost" onclick="doLogout()">Sign out</button>` : ''}
+        <button class="btn btn-ghost" style="flex:1;" onclick="openParties()">👥 Parties</button>
+        ${isOwner() ? `<button class="btn btn-primary" style="flex:1;" onclick="setScreen('purchase')">+ Purchase</button>` : ''}
+        <button class="btn btn-ghost" style="flex:1;" onclick="setScreen('sales')">+ Sale</button>
       </div>
+    </div>
+    <div class="card">
+      <h3>More</h3>
+      <button class="btn btn-ghost" onclick="setScreen('expiryAlert')">⏱ Expiry returns</button>
+      <button class="btn btn-ghost" style="margin-top:8px;" onclick="setScreen('addExpense')">💵 Add Expense</button>
+      <button class="btn btn-ghost" style="margin-top:8px;" onclick="setScreen('reminders')">🔔 Payment reminders</button>
+      ${isOwner() ? `
+      <button class="btn btn-ghost" style="margin-top:8px;" onclick="setScreen('shopSettings')">🏪 Shop details</button>
+      <button class="btn btn-ghost" style="margin-top:8px;" onclick="setScreen('users')">👥 Users &amp; roles</button>
+      <button class="btn btn-ghost" style="margin-top:8px;" onclick="setScreen('auditLog')">📋 Activity log</button>
+      <button class="btn btn-ghost" style="margin-top:8px;" onclick="setScreen('staffList')">👷 Staff Ledger</button>
+      ` : ''}
+      ${CLOUD_MODE ? `<button class="btn btn-ghost" style="margin-top:8px;" onclick="doLogout()">Sign out</button>` : ''}
     </div>
     <div class="card">
       <h3>${CLOUD_MODE ? 'Cloud sync' : 'Data & backup'}</h3>
