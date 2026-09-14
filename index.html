@@ -292,10 +292,24 @@
 /* ===================== DATA LAYER ===================== */
 const DB_KEY = 'hdh_pharmacy_db_v1';
 
+function defaultDB(){
+  return { stock:[], purchases:[], sales:[], purchaseReturns:[], saleReturns:[], parties:[], payments:[],
+           expenses:[], auditLog:[], staff:[], staffLedger:[], shopInfo:{name:'Hussain Drug House', gstin:'18ADOPH1433M1ZB', dlNo:'', address:'2ND Gali Kazir Bazar, Ratabari - 788735', phone:''}, seqs:{} };
+}
+/* Fills in any collection a saved/restored file is missing. Without this, an
+   older backup (or partial data) crashes the app the moment a screen does
+   db.<missing>.filter(...). */
+function normalizeDB(d){
+  const base = defaultDB();
+  Object.keys(base).forEach(k=>{
+    if(d[k]===undefined || d[k]===null) d[k] = base[k];
+  });
+  return d;
+}
 function loadDB(){
   const raw = localStorage.getItem(DB_KEY);
-  if(raw){ try{ return JSON.parse(raw); }catch(e){} }
-  return { stock:[], purchases:[], sales:[], purchaseReturns:[], saleReturns:[], parties:[], payments:[], seqs:{} };
+  if(raw){ try{ return normalizeDB(JSON.parse(raw)); }catch(e){} }
+  return defaultDB();
 }
 function saveDB(db){ localStorage.setItem(DB_KEY, JSON.stringify(db)); }
 let db = loadDB();
@@ -401,13 +415,49 @@ function openCloudModal(){
     </div>
     <button class="btn btn-primary" onclick="connectCloud()">Connect</button>
     ${existing ? `<button class="btn btn-danger" style="margin-top:8px;" onclick="disconnectCloud()">Disconnect & go back to local only</button>` : ''}
-    <div class="step" style="margin-top:10px;"><b>Firestore rules to paste</b> (Firestore → Rules tab) so only signed-in app users can read/write:<br>
-    <textarea class="config-input" readonly style="min-height:80px;">rules_version = '2';
+    <div class="step" style="margin-top:10px;"><b>Setup order matters:</b><br>
+      1. Authentication → Sign-in method → enable <b>Email/Password</b>.<br>
+      2. Authentication → Users → Add user (your own email + password). Copy the <b>User UID</b>.<br>
+      3. Firestore → Data → create collection <b>users</b> → Document ID = that UID → field <b>role</b> = <b>owner</b>.<br>
+      4. Paste the rules below into Firestore → Rules → Publish.<br>
+      <b>Skip step 3 and you'll be treated as staff and locked out of your own reports.</b>
+    </div>
+    <div class="step" style="margin-top:10px;"><b>Firestore rules — paste ALL of this</b> (Firestore → Rules → Publish):<br>
+    <textarea class="config-input" readonly style="min-height:220px;font-size:10px;">rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if request.auth != null;
+
+    function signedIn() { return request.auth != null; }
+    function isOwner() {
+      return signedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'owner';
     }
+
+    // Counter staff need these to sell and check stock.
+    match /stock/{doc}        { allow read, write: if signedIn(); }
+    match /sales/{doc}        { allow read, create: if signedIn();
+                                allow update, delete: if isOwner(); }
+    match /saleReturns/{doc}  { allow read, create: if signedIn(); }
+    match /parties/{doc}      { allow read, create: if signedIn();
+                                allow update, delete: if isOwner(); }
+    match /payments/{doc}     { allow read: if signedIn();
+                                allow write: if isOwner(); }
+    match /settings/{doc}     { allow read: if signedIn();
+                                allow write: if isOwner(); }
+    match /meta/{doc}         { allow read, write: if signedIn(); }
+    match /expenses/{doc}     { allow read, update, delete: if isOwner();
+                                allow create: if signedIn(); }
+
+    // OWNER ONLY — purchase data reveals what you paid the distributor.
+    match /purchases/{doc}       { allow read, write: if isOwner(); }
+    match /purchaseReturns/{doc} { allow read, write: if isOwner(); }
+    match /auditLog/{doc}        { allow read: if isOwner();
+                                   allow create: if signedIn(); }
+    match /staff/{doc}           { allow read, write: if isOwner(); }
+    match /staffLedger/{doc}     { allow read, write: if isOwner(); }
+
+    match /users/{uid} { allow read: if signedIn();
+                         allow write: if isOwner(); }
   }
 }</textarea></div>
   `;
@@ -430,6 +480,64 @@ function disconnectCloud(){
   location.reload();
 }
 
+/* ===================== ROLES, LOGIN, AUDIT ===================== */
+let serverRole = null;          // 'owner' | 'staff' | null
+let currentUserEmail = '';
+function isServerOwner(){ return serverRole === 'owner'; }
+function isOwner(){ return CLOUD_MODE ? serverRole==='owner' : true; }
+function ownerOnlyNotice(){
+  return `<button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('dashboard')">\u2190 Back to Dashboard</button>
+    <div class="card"><h3>Owner access only</h3>
+      <div class="step">This section is restricted to owner accounts. Ask the owner if you need access.</div></div>`;
+}
+let cloudUnsubscribers = [];
+function detachCloudListeners(){
+  cloudUnsubscribers.forEach(fn=>{ try{ fn(); }catch(e){} });
+  cloudUnsubscribers = [];
+}
+function showLoginScreen(){
+  const main = document.getElementById('main');
+  if(!main) return;
+  main.innerHTML = `
+    <div class="card">
+      <h3>Sign in</h3>
+      <div class="step">Each person has their own login. Owners see everything; counter staff can bill and view stock but not purchase costs, profit or expenses.</div>
+      <div class="field"><label>Email</label><input id="loginEmail" type="email" autocomplete="username"/></div>
+      <div class="field"><label>Password</label><input id="loginPassword" type="password" autocomplete="current-password"/></div>
+      <button class="btn btn-primary" onclick="doLogin()">Sign in</button>
+      <button class="btn btn-ghost" style="margin-top:8px;" onclick="doPasswordReset()">Forgot password?</button>
+    </div>`;
+}
+function doLogin(){
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  if(!email || !password){ alert('Enter email and password.'); return; }
+  firebase.auth().signInWithEmailAndPassword(email, password).catch(e=>alert('Sign-in failed: '+e.message));
+}
+function doPasswordReset(){
+  const email = document.getElementById('loginEmail').value.trim();
+  if(!email){ alert('Enter your email address first, then tap this again.'); return; }
+  firebase.auth().sendPasswordResetEmail(email).then(()=>alert('Password reset link sent to '+email)).catch(e=>alert('Could not send reset: '+e.message));
+}
+function doLogout(){
+  if(!confirm('Sign out of this device?')) return;
+  firebase.auth().signOut();
+}
+function logAudit(action, detail){
+  const entry = { action, detail, role: serverRole||'local', at: new Date().toISOString() };
+  if(CLOUD_MODE && fsDB){
+    fsDB.collection('auditLog').add(Object.assign({}, entry, {createdAt:firebase.firestore.FieldValue.serverTimestamp()})).catch(e=>console.error('audit', e));
+  } else {
+    if(!db.auditLog) db.auditLog=[];
+    db.auditLog.push(Object.assign({id: nextId('AUD')}, entry));
+    if(db.auditLog.length>500) db.auditLog = db.auditLog.slice(-500);
+    saveDB(db);
+  }
+}
+window.doLogin = doLogin;
+window.doPasswordReset = doPasswordReset;
+window.doLogout = doLogout;
+
 function initCloudIfConfigured(){
   const cfg = getStoredConfig();
   if(!cfg) return false;
@@ -450,24 +558,37 @@ function initCloudIfConfigured(){
     return false;
   }
   try{ fbStorage = firebase.storage(); }catch(e){ fbStorage = null; } // Storage is optional; bill photos are stored in Firestore instead (see ensureFirestoreSafePhoto)
-  firebase.auth().signInAnonymously().catch(err=>{
-    console.error('Anonymous sign-in failed', err);
-    showCloudConnectError('Sign-in failed: '+err.code+' — '+err.message);
-  });
-  firebase.auth().onAuthStateChanged(user=>{
+  firebase.auth().onAuthStateChanged(async user=>{
     if(user){
+      currentUserEmail = user.email || '';
+      try{
+        const roleDoc = await fsDB.collection('users').doc(user.uid).get();
+        serverRole = roleDoc.exists ? (roleDoc.data().role || 'staff') : 'staff';
+      }catch(e){
+        console.error('Could not read role', e);
+        serverRole = 'staff';   // fail closed — least privilege if role can't be read
+      }
       CLOUD_MODE = true;
+      if(serverRole !== 'owner'){
+        // Device may hold owner data from an earlier local session; staff must
+        // never see it and nothing will refresh it, so clear it out.
+        db.expenses = [];
+        db.auditLog = [];
+        db.staff = [];
+        db.staffLedger = [];
+      }
       updateCloudBadge();
       attachCloudListeners();
+      setScreen('dashboard');
+    } else {
+      detachCloudListeners();
+      CLOUD_MODE = false;
+      serverRole = null;
+      currentUserEmail = '';
+      updateCloudBadge();
+      showLoginScreen();
     }
   });
-  // Safety net: if nothing has connected within 12 seconds, stop spinning forever
-  // and show what's actually wrong instead of a silent stuck screen.
-  setTimeout(()=>{
-    if(!CLOUD_MODE && currentScreen!=='printPreview'){
-      showCloudConnectError('Still not connected after 12 seconds. This usually means the Firestore security rules haven\'t been published yet, or the pasted config has a typo.');
-    }
-  }, 12000);
   return true;
 }
 
@@ -490,35 +611,32 @@ function showCloudConnectError(message){
   `;
 }
 
+function listenerError(label){
+  return function(err){
+    console.error(label+' listener', err);
+    if(!firebase.auth().currentUser) return;   // signing out — expected, ignore
+    if(label==='stock') showCloudConnectError('Database error ('+label+'): '+err.code+' — '+err.message);
+  };
+}
 function attachCloudListeners(){
-  fsDB.collection('stock').onSnapshot(snap=>{
-    db.stock = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
-  }, err=>{ console.error('stock listener', err); showCloudConnectError('Database error: '+err.code+' — '+err.message); });
-  fsDB.collection('purchases').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{
-    db.purchases = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
-  }, err=>console.error('purchases listener', err));
-  fsDB.collection('sales').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{
-    db.sales = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
-  }, err=>console.error('sales listener', err));
-  fsDB.collection('purchaseReturns').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{
-    db.purchaseReturns = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
-  }, err=>console.error('purchaseReturns listener', err));
-  fsDB.collection('saleReturns').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{
-    db.saleReturns = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
-  }, err=>console.error('saleReturns listener', err));
-  fsDB.collection('parties').onSnapshot(snap=>{
-    db.parties = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
-  }, err=>console.error('parties listener', err));
-  fsDB.collection('payments').orderBy('createdAt','desc').limit(300).onSnapshot(snap=>{
-    db.payments = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
-  }, err=>console.error('payments listener', err));
+  detachCloudListeners();
+  const sub = fn => cloudUnsubscribers.push(fn);
+
+  sub(fsDB.collection('stock').onSnapshot(snap=>{ db.stock = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('stock')));
+  sub(fsDB.collection('sales').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{ db.sales = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('sales')));
+  sub(fsDB.collection('saleReturns').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{ db.saleReturns = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('saleReturns')));
+  sub(fsDB.collection('parties').onSnapshot(snap=>{ db.parties = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('parties')));
+  sub(fsDB.collection('payments').orderBy('createdAt','desc').limit(300).onSnapshot(snap=>{ db.payments = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('payments')));
+  sub(fsDB.collection('settings').doc('shopInfo').onSnapshot(snap=>{ if(snap.exists) db.shopInfo = snap.data(); render(); }, listenerError('shopInfo')));
+
+  // Purchase data exposes what you paid the distributor — owner only.
+  if(!isServerOwner()) return;
+  sub(fsDB.collection('purchases').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{ db.purchases = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('purchases')));
+  sub(fsDB.collection('purchaseReturns').orderBy('createdAt','desc').limit(200).onSnapshot(snap=>{ db.purchaseReturns = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('purchaseReturns')));
+  sub(fsDB.collection('expenses').onSnapshot(snap=>{ db.expenses = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('expenses')));
+  sub(fsDB.collection('auditLog').orderBy('createdAt','desc').limit(300).onSnapshot(snap=>{ db.auditLog = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('auditLog')));
+  sub(fsDB.collection('staff').onSnapshot(snap=>{ db.staff = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('staff')));
+  sub(fsDB.collection('staffLedger').onSnapshot(snap=>{ db.staffLedger = snap.docs.map(d=>({id:d.id, ...d.data()})); render(); }, listenerError('staffLedger')));
 }
 
 function updateCloudBadge(){
@@ -599,6 +717,7 @@ async function saveSaleCloud(){
         const it = saleDraft.items[i];
         const needed = Number(it.qty)+Number(it.freeQty);
         tx.update(refs[i], {qty: firebase.firestore.FieldValue.increment(-needed)});
+        saleDraft.items[i].costAtSale = snap.exists ? (snap.data().purchaseRate||0) : 0;
         const gross = Number(it.qty)*Number(it.rate);
         const disc = gross*Number(it.discount)/100;
         const net = gross-disc; // MRP already includes GST — this is what the customer pays
@@ -641,7 +760,7 @@ function importBackup(file){
     try{
       const parsed = JSON.parse(reader.result);
       if(!confirm('This will replace all data currently on this device with the backup file. Continue?')) return;
-      db = parsed;
+      db = normalizeDB(parsed);
       saveDB(db);
       alert('Backup restored.');
       render();
@@ -671,7 +790,17 @@ const titles = {
   printPreview:['Document','Preview & print'],
   parties:['Parties','Suppliers & customers — who you owe, who owes you'],
   partyDetail:['Party ledger','Transaction history & balance'],
-  editBill:['Edit bill','Fix a missing party or add a missed item']
+  editBill:['Edit bill','Fix a missing party or add a missed item'],
+  expiryAlert:['Expiry returns','Send back before the window closes'],
+  addExpense:['Add Expense','Log a shop expense'],
+  expenses:['Expenses','Full expense tracker'],
+  pnl:['Profit & Loss','True profit after all costs'],
+  shopSettings:['Shop details','Printed on every bill'],
+  reminders:['Payment reminders','Customers with pending balance'],
+  auditLog:['Activity log','Who did what, and when'],
+  users:['Users & roles','Who can see what'],
+  staffList:['Staff Ledger','Salary, advances & pending balance'],
+  staffDetail:['Staff ledger','Payments & advances']
 };
 
 function setScreen(name){
@@ -689,6 +818,19 @@ document.querySelectorAll('.nav-btn').forEach(b=>{
 
 function render(){
   const main = document.getElementById('main');
+  if(!CLOUD_MODE && getStoredConfig() && typeof firebase!=='undefined' && firebase.auth && !firebase.auth().currentUser){
+    showLoginScreen(); return;
+  }
+  if(currentScreen==='expiryAlert'){ main.innerHTML = renderExpiryAlert(); attachHandlers(); return; }
+  if(currentScreen==='addExpense'){ main.innerHTML = renderAddExpense(); attachHandlers(); return; }
+  if(currentScreen==='expenses'){ main.innerHTML = renderExpenses(); attachHandlers(); return; }
+  if(currentScreen==='pnl'){ main.innerHTML = renderPnL(); attachHandlers(); return; }
+  if(currentScreen==='shopSettings'){ main.innerHTML = renderShopSettings(); attachHandlers(); return; }
+  if(currentScreen==='reminders'){ main.innerHTML = renderReminders(); attachHandlers(); return; }
+  if(currentScreen==='auditLog'){ main.innerHTML = renderAuditLog(); attachHandlers(); return; }
+  if(currentScreen==='users'){ main.innerHTML = renderUsers(); attachHandlers(); return; }
+  if(currentScreen==='staffList'){ main.innerHTML = renderStaffList(); attachHandlers(); return; }
+  if(currentScreen==='staffDetail'){ main.innerHTML = renderStaffDetail(); attachHandlers(); return; }
   if(currentScreen==='printPreview'){ main.innerHTML = renderPrintPreview(); attachHandlers(); return; }
   if(currentScreen==='parties'){ main.innerHTML = renderPartiesList(); attachHandlers(); return; }
   if(currentScreen==='partyDetail'){ main.innerHTML = renderPartyDetail(); attachHandlers(); return; }
@@ -702,6 +844,559 @@ function render(){
 }
 
 /* ===================== DASHBOARD ===================== */
+
+/* ===================== EXPIRY RETURN ALERT ===================== */
+/* Distributors normally only accept returns while a reasonable window is left
+   before expiry. Past that window the stock becomes a straight loss, so this
+   screen surfaces what to send back while it still counts. */
+let expiryWindowDays = Number(localStorage.getItem('hdh_expiry_window')) || 120;
+function setExpiryWindow(d){ expiryWindowDays = Number(d)||120; localStorage.setItem('hdh_expiry_window', expiryWindowDays); render(); }
+function renderExpiryAlert(){
+  const rows = db.stock
+    .filter(s=> s.qty>0)
+    .map(s=>({s, days: daysUntil(s.expiry)}))
+    .filter(x=> x.days!==null && x.days <= expiryWindowDays)
+    .sort((a,b)=> a.days-b.days);
+  const expired = rows.filter(x=>x.days < 0);
+  const actionable = rows.filter(x=>x.days >= 0);
+  const valueAtRisk = actionable.reduce((a,x)=> a + x.s.qty*(x.s.purchaseRate||0), 0);
+  const line = (x, isExpired)=>`
+    <div class="list-row">
+      <div style="flex:1;">
+        <div class="li-main">${x.s.itemName}</div>
+        <div class="li-sub">Batch ${x.s.batch||'—'} • Exp ${x.s.expiry||'—'} • ${x.s.qty} unit(s)${isExpired?'' : ' • '+x.days+' days left'}</div>
+      </div>
+      <div class="li-right" style="color:${isExpired?'var(--red-700)':'var(--amber-600)'};">${fmt(x.s.qty*(x.s.purchaseRate||0))}</div>
+    </div>`;
+  return `
+    <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('dashboard')">← Back to Dashboard</button>
+    <div class="stat-grid">
+      <div class="stat"><div class="num">${actionable.length}</div><div class="lbl">To return now</div></div>
+      <div class="stat"><div class="num">${fmt(valueAtRisk)}</div><div class="lbl">Value you can still recover</div></div>
+    </div>
+    <div class="card">
+      <h3>Alert window</h3>
+      <div class="step">Flag stock expiring within this many days. Most distributors accept returns 3–6 months ahead, so 120 days is a safe default.</div>
+      <div class="field"><label>Days</label><input type="number" value="${expiryWindowDays}" onchange="setExpiryWindow(this.value)"/></div>
+    </div>
+    <div class="card">
+      <h3>Return to distributor (${actionable.length})</h3>
+      <div class="step">Still within the window — send these back to recover the money.</div>
+      ${actionable.length ? actionable.map(x=>line(x,false)).join('') : `<div class="empty">Nothing needs returning right now.</div>`}
+      ${actionable.length ? `<button class="btn btn-primary" style="margin-top:10px;" onclick="setScreen('purchase')">Start a purchase return →</button>` : ''}
+    </div>
+    ${expired.length ? `
+    <div class="card">
+      <h3 style="color:var(--red-700);">Already expired (${expired.length})</h3>
+      <div class="step">Past expiry — most distributors will not accept these. Remove from shelves.</div>
+      ${expired.map(x=>line(x,true)).join('')}
+    </div>` : ''}
+  `;
+}
+window.setExpiryWindow = setExpiryWindow;
+
+/* ===================== EXPENSES ===================== */
+const EXPENSE_CATEGORIES = ['Staff Salary','Shop Rent','Electricity','Refreshment','Maintenance','Transport','Others'];
+let expenseFilter = { category:'', from:'', to:'', search:'' };
+let editingExpenseId = null;
+
+function renderAddExpense(){
+  editingExpenseId = null;
+  const today = todayStr();
+  return `
+    <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('dashboard')">← Back to Dashboard</button>
+    <div class="card">
+      <h3>Add expense</h3>
+      <div class="row2">
+        <div class="field"><label>Date</label><input id="expDate" type="date" value="${today}"/></div>
+        <div class="field"><label>Category</label><select id="expCategory">${EXPENSE_CATEGORIES.map(x=>`<option>${x}</option>`).join('')}</select></div>
+      </div>
+      <div class="field"><label>Amount</label><input id="expAmount" type="number" placeholder="0"/></div>
+      <div class="field"><label>Note (optional)</label><input id="expNote"/></div>
+      <button class="btn btn-primary" onclick="saveExpenseEntry()">+ Add expense</button>
+    </div>`;
+}
+function saveExpense(){
+  const date = document.getElementById('expDate').value;
+  const category = document.getElementById('expCategory').value;
+  const amount = Number(document.getElementById('expAmount').value);
+  const note = document.getElementById('expNote').value.trim();
+  if(!date || !amount || amount<=0){ alert('Enter a date and a valid amount.'); return false; }
+  const record = {date, category, amount, note};
+  logAudit('Expense '+(editingExpenseId?'edited':'added'), category+' • '+fmt(amount));
+  if(editingExpenseId){
+    if(CLOUD_MODE) fsDB.collection('expenses').doc(editingExpenseId).update(record).catch(e=>alert('Could not save: '+e.message));
+    else { const i = db.expenses.findIndex(e=>e.id===editingExpenseId); if(i>-1) db.expenses[i]=Object.assign({id:editingExpenseId},record); saveDB(db); }
+    editingExpenseId = null;
+  } else {
+    if(CLOUD_MODE) fsDB.collection('expenses').add(Object.assign({},record,{createdAt:firebase.firestore.FieldValue.serverTimestamp()})).catch(e=>alert('Could not save: '+e.message));
+    else { record.id = nextId('EXP'); db.expenses.push(record); saveDB(db); }
+  }
+  render();
+  return true;
+}
+function saveExpenseEntry(){ if(saveExpense()===false) return; setScreen('dashboard'); }
+function deleteExpense(id){
+  if(!confirm('Delete this expense entry?')) return;
+  logAudit('Expense deleted', id);
+  if(CLOUD_MODE) fsDB.collection('expenses').doc(id).delete().catch(e=>alert('Could not delete: '+e.message));
+  else { db.expenses = db.expenses.filter(e=>e.id!==id); saveDB(db); render(); }
+}
+function renderExpenses(){
+  if(!isOwner()) return ownerOnlyNotice();
+  const today = todayStr();
+  if(!expenseFilter.from) expenseFilter.from = today.slice(0,8)+'01';
+  if(!expenseFilter.to) expenseFilter.to = today;
+  let list = (db.expenses||[]).filter(e=>e.date>=expenseFilter.from && e.date<=expenseFilter.to);
+  if(expenseFilter.category) list = list.filter(e=>e.category===expenseFilter.category);
+  if(expenseFilter.search) list = list.filter(e=>(e.note||'').toLowerCase().includes(expenseFilter.search.toLowerCase()));
+  list.sort((a,b)=> a.date<b.date?1:-1);
+  const total = list.reduce((a,e)=>a+Number(e.amount||0),0);
+  const byCat = {};
+  list.forEach(e=>{ byCat[e.category]=(byCat[e.category]||0)+Number(e.amount||0); });
+  return `
+    <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('reports')">← Back to Reports</button>
+    <div class="card">
+      <h3>Filter</h3>
+      <div class="row2">
+        <div class="field"><label>From</label><input type="date" value="${expenseFilter.from}" onchange="expenseFilter.from=this.value;render()"/></div>
+        <div class="field"><label>To</label><input type="date" value="${expenseFilter.to}" onchange="expenseFilter.to=this.value;render()"/></div>
+      </div>
+      <div class="field"><label>Category</label>
+        <select onchange="expenseFilter.category=this.value;render()">
+          <option value="">All categories</option>
+          ${EXPENSE_CATEGORIES.map(x=>`<option ${expenseFilter.category===x?'selected':''}>${x}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Search note</label><input value="${expenseFilter.search}" oninput="expenseFilter.search=this.value;render()"/></div>
+    </div>
+    <div class="stat-grid">
+      <div class="stat"><div class="num">${fmt(total)}</div><div class="lbl">Total (filtered)</div></div>
+      <div class="stat"><div class="num">${list.length}</div><div class="lbl">Entries</div></div>
+    </div>
+    <div class="card">
+      <h3>By category</h3>
+      ${Object.keys(byCat).length ? Object.keys(byCat).map(k=>`<div class="list-row"><div class="li-main">${k}</div><div class="li-right">${fmt(byCat[k])}</div></div>`).join('') : `<div class="empty">No expenses in this range.</div>`}
+    </div>
+    <div class="card">
+      <h3>Entries (${list.length})</h3>
+      ${list.length ? list.map(e=>`
+        <div class="list-row">
+          <div style="flex:1;"><div class="li-main">${e.category}</div><div class="li-sub">${e.date}${e.note?' • '+e.note:''}</div></div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="li-right">${fmt(e.amount)}</div>
+            <button class="btn btn-danger btn-sm" onclick="deleteExpense('${e.id}')">Del</button>
+          </div>
+        </div>`).join('') : `<div class="empty">No expenses recorded.</div>`}
+    </div>`;
+}
+window.saveExpenseEntry = saveExpenseEntry;
+window.deleteExpense = deleteExpense;
+
+/* ===================== PROFIT & LOSS ===================== */
+let pnlMode = 'monthly';
+let pnlMonth = new Date().toISOString().slice(0,7);
+let pnlFrom = todayStr(), pnlTo = todayStr();
+function renderPnL(){
+  if(!isOwner()) return ownerOnlyNotice();
+  const today = todayStr();
+  let sales, purchases, saleReturns, expenses, label;
+  if(pnlMode==='daily'){
+    sales=db.sales.filter(s=>s.date===today); purchases=db.purchases.filter(p=>p.date===today);
+    saleReturns=db.saleReturns.filter(r=>r.date===today); expenses=(db.expenses||[]).filter(e=>e.date===today); label='Today';
+  } else if(pnlMode==='monthly'){
+    sales=db.sales.filter(s=>s.date.startsWith(pnlMonth)); purchases=db.purchases.filter(p=>p.date.startsWith(pnlMonth));
+    saleReturns=db.saleReturns.filter(r=>r.date.startsWith(pnlMonth)); expenses=(db.expenses||[]).filter(e=>e.date.startsWith(pnlMonth)); label=pnlMonth;
+  } else {
+    sales=db.sales.filter(s=>s.date>=pnlFrom&&s.date<=pnlTo); purchases=db.purchases.filter(p=>p.date>=pnlFrom&&p.date<=pnlTo);
+    saleReturns=db.saleReturns.filter(r=>r.date>=pnlFrom&&r.date<=pnlTo); expenses=(db.expenses||[]).filter(e=>e.date>=pnlFrom&&e.date<=pnlTo); label=pnlFrom+' to '+pnlTo;
+  }
+  // Revenue is GST-exclusive; MRP already includes GST so strip it back out.
+  let revenue=0, outputGst=0, cogs=0;
+  sales.forEach(s=>{
+    (s.items||[]).forEach(it=>{
+      const gross=Number(it.qty)*Number(it.rate), disc=gross*Number(it.discount||0)/100, net=gross-disc;
+      const taxable=net/(1+Number(it.gst||0)/100);
+      revenue += taxable; outputGst += net-taxable;
+      cogs += Number(it.qty)*(it.costAtSale!=null?it.costAtSale:0);
+    });
+  });
+  let returnRevenue=0;
+  saleReturns.forEach(r=>{ (r.items||[]).forEach(it=>{
+    const net=Number(it.qty)*Number(it.rate);
+    returnRevenue += net/(1+Number(it.gst||0)/100);
+  });});
+  const inputGst = purchases.reduce((a,p)=>a+(p.totalGst||0),0);
+  const netRevenue = revenue-returnRevenue;
+  const grossProfit = netRevenue-cogs;
+  const opex = expenses.reduce((a,e)=>a+Number(e.amount||0),0);
+  const netProfit = grossProfit-opex;
+  const netGst = outputGst-inputGst;
+  return `
+    <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('reports')">← Back to Reports</button>
+    <div class="segment">
+      <button class="${pnlMode==='daily'?'active':''}" onclick="pnlMode='daily';render()">Daily</button>
+      <button class="${pnlMode==='monthly'?'active':''}" onclick="pnlMode='monthly';render()">Monthly</button>
+      <button class="${pnlMode==='custom'?'active':''}" onclick="pnlMode='custom';render()">Custom</button>
+    </div>
+    ${pnlMode==='monthly'?`<div class="field"><label>Month</label><input type="month" value="${pnlMonth}" onchange="pnlMonth=this.value;render()"/></div>`:''}
+    ${pnlMode==='custom'?`<div class="row2">
+      <div class="field"><label>From</label><input type="date" value="${pnlFrom}" onchange="pnlFrom=this.value;render()"/></div>
+      <div class="field"><label>To</label><input type="date" value="${pnlTo}" onchange="pnlTo=this.value;render()"/></div></div>`:''}
+    <div class="card">
+      <h3>${label} — Profit &amp; Loss</h3>
+      <div class="total-line"><span>Net sales (excl. GST)</span><span>${fmt(netRevenue)}</span></div>
+      <div class="total-line"><span>Cost of medicines sold</span><span>-${fmt(cogs)}</span></div>
+      <div class="total-line grand"><span>Gross Profit</span><span>${fmt(grossProfit)}</span></div>
+      <div class="total-line" style="margin-top:10px;"><span>Expenses (rent, salary, etc.)</span><span>-${fmt(opex)}</span></div>
+      <div class="total-line grand" style="color:${netProfit<0?'var(--red-700)':'var(--green-700, var(--teal-900))'};"><span>Net Profit${netProfit<0?' (Loss)':''}</span><span>${fmt(netProfit)}</span></div>
+    </div>
+    <div class="card">
+      <h3>GST position (not part of profit)</h3>
+      <div class="total-line"><span>Output GST (on sales)</span><span>${fmt(outputGst)}</span></div>
+      <div class="total-line"><span>Input Tax Credit (on purchases)</span><span>-${fmt(inputGst)}</span></div>
+      <div class="total-line grand"><span>Net GST ${netGst>=0?'Payable':'Receivable'}</span><span>${fmt(Math.abs(netGst))}</span></div>
+    </div>
+    <div class="card">
+      <h3>How this is calculated</h3>
+      <div class="step">• Cost uses the purchase rate recorded when each item was sold.</div>
+      <div class="step">• GST is excluded from profit entirely and shown separately as a compliance figure.</div>
+      <div class="step">• Items sold before cost tracking existed count as zero cost, which overstates profit for older bills.</div>
+    </div>`;
+}
+
+/* ===================== SHOP SETTINGS (incl. Drug Licence) ===================== */
+function renderShopSettings(){
+  if(!isOwner()) return ownerOnlyNotice();
+  const s = db.shopInfo || {};
+  return `
+    <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('dashboard')">← Back to Dashboard</button>
+    <div class="card">
+      <h3>Shop details</h3>
+      <div class="step">Printed on every sale bill, purchase bill and return document.</div>
+      <div class="field"><label>Shop name</label><input id="shopName" value="${s.name||''}"/></div>
+      <div class="field"><label>GSTIN</label><input id="shopGstin" value="${s.gstin||''}"/></div>
+      <div class="field"><label>Drug Licence No.</label><input id="shopDl" value="${s.dlNo||''}" placeholder="e.g. 20B/21B-XXXX"/></div>
+      <div class="field"><label>Address</label><input id="shopAddress" value="${s.address||''}"/></div>
+      <div class="field"><label>Phone</label><input id="shopPhone" value="${s.phone||''}"/></div>
+      <button class="btn btn-primary" onclick="saveShopInfo()">Save</button>
+    </div>`;
+}
+function saveShopInfo(){
+  const info = {
+    name: document.getElementById('shopName').value.trim(),
+    gstin: document.getElementById('shopGstin').value.trim(),
+    dlNo: document.getElementById('shopDl').value.trim(),
+    address: document.getElementById('shopAddress').value.trim(),
+    phone: document.getElementById('shopPhone').value.trim()
+  };
+  db.shopInfo = info;
+  logAudit('Shop details updated', info.name);
+  if(CLOUD_MODE) fsDB.collection('settings').doc('shopInfo').set(info).catch(e=>alert('Could not save: '+e.message));
+  else saveDB(db);
+  alert('Shop details saved.');
+  setScreen('dashboard');
+}
+window.saveShopInfo = saveShopInfo;
+
+/* ===================== PAYMENT REMINDERS ===================== */
+let reminderLang = localStorage.getItem('hdh_reminder_lang') || 'en';
+function setReminderLang(l){ reminderLang=l; localStorage.setItem('hdh_reminder_lang', l); render(); }
+function buildReminderMessage(p, bal, lang){
+  const shop = db.shopInfo||{};
+  const nm = shop.name||'Hussain Drug House';
+  if(lang==='bn'){
+    return `প্রিয় ${p.name},\n\nআপনাকে বিনীতভাবে জানানো যাচ্ছে যে ${nm}-এ আপনার হিসাবে ${fmt(bal)} টাকা বকেয়া রয়েছে।\n\nঅনুগ্রহ করে সুবিধামতো সময়ে পরিশোধ করার ব্যবস্থা করবেন।\n\nধন্যবাদ,\n${nm}${shop.phone?'\n'+shop.phone:''}`;
+  }
+  return `Dear ${p.name},\n\nThis is a gentle reminder that an amount of ${fmt(bal)} is pending against your account with ${nm}.\n\nKindly arrange the payment at your convenience.\n\nThank you,\n${nm}${shop.phone?'\n'+shop.phone:''}`;
+}
+function sendReminder(partyId){
+  const p = db.parties.find(x=>x.id===partyId);
+  if(!p || !p.phone) return;
+  const bal = partyBalance(partyId);
+  const phone = p.phone.replace(/[^0-9]/g,'');
+  const withCountry = phone.length===10 ? '91'+phone : phone;
+  logAudit('Payment reminder opened', p.name+' • '+fmt(bal));
+  window.open('https://wa.me/'+withCountry+'?text='+encodeURIComponent(buildReminderMessage(p,bal,reminderLang)), '_blank');
+}
+function renderReminders(){
+  const debtors = db.parties.filter(p=>p.type==='customer' && partyBalance(p.id)>0)
+    .map(p=>({party:p, bal:partyBalance(p.id)})).sort((a,b)=>b.bal-a.bal);
+  const totalDue = debtors.reduce((a,d)=>a+d.bal,0);
+  const sample = debtors.length ? buildReminderMessage(debtors[0].party, debtors[0].bal, reminderLang) : '';
+  return `
+    <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('dashboard')">← Back to Dashboard</button>
+    <div class="stat-grid">
+      <div class="stat"><div class="num">${fmt(totalDue)}</div><div class="lbl">Total outstanding</div></div>
+      <div class="stat"><div class="num">${debtors.length}</div><div class="lbl">Customers owing</div></div>
+    </div>
+    <div class="card">
+      <h3>Message language</h3>
+      <div class="segment">
+        <button class="${reminderLang==='en'?'active':''}" onclick="setReminderLang('en')">English</button>
+        <button class="${reminderLang==='bn'?'active':''}" onclick="setReminderLang('bn')">বাংলা</button>
+      </div>
+      ${sample?`<div class="step" style="white-space:pre-wrap;background:var(--stone-200,#eee);padding:10px;border-radius:9px;margin-top:8px;">${sample}</div>`:''}
+    </div>
+    <div class="card">
+      <h3>Customers with pending balance</h3>
+      <div class="step">Opens WhatsApp with the message ready — you review before sending.</div>
+      ${debtors.length ? debtors.map(d=>`
+        <div class="list-row">
+          <div style="flex:1;cursor:pointer;" onclick="openPartyDetail('${d.party.id}')"><div class="li-main">${d.party.name}</div><div class="li-sub">${d.party.phone||'No phone on file'}</div></div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="li-right" style="color:var(--red-700);">${fmt(d.bal)}</div>
+            ${d.party.phone?`<button class="btn btn-primary btn-sm" onclick="sendReminder('${d.party.id}')">Remind</button>`:''}
+          </div>
+        </div>`).join('') : `<div class="empty">No outstanding balances.</div>`}
+    </div>`;
+}
+window.setReminderLang = setReminderLang;
+window.sendReminder = sendReminder;
+
+/* ===================== AUDIT LOG ===================== */
+function renderAuditLog(){
+  if(!isOwner()) return ownerOnlyNotice();
+  const entries = (db.auditLog||[]).slice().sort((a,b)=>(a.at||'')<(b.at||'')?1:-1).slice(0,300);
+  return `
+    <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('dashboard')">← Back to Dashboard</button>
+    <div class="card">
+      <h3>Recent activity (${entries.length})</h3>
+      ${entries.length ? entries.map(e=>{
+        const when = e.at ? new Date(e.at).toLocaleString('en-IN') : '';
+        return `<div class="list-row"><div><div class="li-main">${e.action}</div><div class="li-sub">${when} • ${e.role||'—'}${e.detail?' • '+e.detail:''}</div></div></div>`;
+      }).join('') : `<div class="empty">No activity recorded yet.</div>`}
+    </div>`;
+}
+
+/* ===================== USERS & ROLES ===================== */
+function renderUsers(){
+  if(!isOwner()) return ownerOnlyNotice();
+  if(!CLOUD_MODE){
+    return `<button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('dashboard')">← Back</button>
+      <div class="card"><h3>Users &amp; roles</h3><div class="step">Needs cloud sync turned on — roles live in the database and are enforced by the server.</div></div>`;
+  }
+  return `
+    <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('dashboard')">← Back to Dashboard</button>
+    <div class="card">
+      <h3>Signed in as</h3>
+      <div class="step">${currentUserEmail} • role: <b>${serverRole||'unknown'}</b></div>
+      <button class="btn btn-ghost" onclick="doLogout()">Sign out</button>
+    </div>
+    <div class="card">
+      <h3>Add a staff account</h3>
+      <div class="step">Creates their login and role in one step. You stay signed in as yourself.</div>
+      <div class="field"><label>Their name</label><input id="quickUserName"/></div>
+      <div class="field"><label>Email</label><input id="quickUserEmail" type="email"/></div>
+      <div class="field"><label>Temporary password (6+ characters)</label><input id="quickUserPassword"/></div>
+      <div class="field"><label>Role</label><select id="quickUserRole"><option value="staff">Staff</option><option value="owner">Owner (full access)</option></select></div>
+      <button class="btn btn-primary" onclick="createStaffAccount()">Create account</button>
+    </div>
+    <div class="card">
+      <h3>What counter staff can and cannot see</h3>
+      <div class="step"><b>CAN:</b> stock &amp; expiry, create sale bills, sale returns, customer ledger, payment reminders, log an expense.</div>
+      <div class="step"><b>CANNOT:</b> purchase bills and rates, purchase returns, Profit &amp; Loss, expense reports, activity log — blocked by the server, not just hidden.</div>
+    </div>`;
+}
+async function createStaffAccount(){
+  const name = document.getElementById('quickUserName').value.trim();
+  const email = document.getElementById('quickUserEmail').value.trim();
+  const password = document.getElementById('quickUserPassword').value;
+  const role = document.getElementById('quickUserRole').value;
+  if(!name||!email||!password){ alert('Fill in name, email and password.'); return; }
+  if(password.length<6){ alert('Password needs at least 6 characters.'); return; }
+  let secondary;
+  try{
+    secondary = firebase.initializeApp(getStoredConfig(), 'AccountCreator_'+Date.now());
+    const cred = await secondary.auth().createUserWithEmailAndPassword(email, password);
+    const uid = cred.user.uid;
+    await secondary.auth().signOut();
+    await fsDB.collection('users').doc(uid).set({name, role});
+    logAudit('Staff account created', name+' ('+email+') → '+role);
+    alert('Account created.\n\nEmail: '+email+'\nPassword: '+password+'\n\nShare these with '+name+'.');
+    document.getElementById('quickUserName').value='';
+    document.getElementById('quickUserEmail').value='';
+    document.getElementById('quickUserPassword').value='';
+  }catch(e){ console.error(e); alert('Could not create account: '+e.message); }
+  finally{ if(secondary) secondary.delete().catch(()=>{}); }
+}
+window.createStaffAccount = createStaffAccount;
+
+
+/* ===================== STAFF LEDGER ===================== */
+/* Positive balance = you still owe the staff member. Salary Due increases it,
+   Salary Payment and Advance reduce it. Only actual payments count as a
+   business expense — an advance is money lent, not spent. */
+function staffBalance(staffId){
+  const st = (db.staff||[]).find(s=>s.id===staffId);
+  if(!st) return 0;
+  let bal = Number(st.openingBalance)||0;
+  (db.staffLedger||[]).filter(e=>e.staffId===staffId).forEach(e=>{
+    if(e.type==='due') bal += Number(e.amount)||0;
+    else bal -= Number(e.amount)||0;
+  });
+  return bal;
+}
+let editingStaffDetails = false;
+function renderStaffList(){
+  if(!isOwner()) return ownerOnlyNotice();
+  const rows = (db.staff||[]).map(s=>{
+    const bal = staffBalance(s.id);
+    return `<div class="list-row" style="cursor:pointer;" onclick="openStaffDetail('${s.id}')">
+      <div style="flex:1;"><div class="li-main">${s.name}</div><div class="li-sub">${s.role||''}${s.phone?' • '+s.phone:''}</div></div>
+      <div class="li-right" style="color:${bal>0?'var(--red-700)':'inherit'};">${fmt(Math.abs(bal))}</div>
+    </div>`;
+  }).join('');
+  return `
+    <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('dashboard')">← Back to Dashboard</button>
+    <div class="card">
+      <h3>Add staff</h3>
+      <div class="field"><label>Name</label><input id="newStaffName" placeholder="e.g. Rahim"/></div>
+      <div class="row2">
+        <div class="field"><label>Role (optional)</label><input id="newStaffRole" placeholder="e.g. Counter"/></div>
+        <div class="field"><label>Phone (optional)</label><input id="newStaffPhone"/></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Monthly salary (reference)</label><input id="newStaffSalary" type="number" placeholder="0"/></div>
+        <div class="field"><label>Opening balance already owed</label><input id="newStaffOpening" type="number" value="0"/></div>
+      </div>
+      <button class="btn btn-primary" onclick="saveStaff()">+ Add staff</button>
+    </div>
+    <div class="card"><h3>Staff (${(db.staff||[]).length})</h3>${rows || `<div class="empty">No staff added yet.</div>`}</div>`;
+}
+function saveStaff(){
+  const name = document.getElementById('newStaffName').value.trim();
+  if(!name){ alert('Enter a name.'); return; }
+  const rec = {
+    name,
+    role: document.getElementById('newStaffRole').value.trim(),
+    phone: document.getElementById('newStaffPhone').value.trim(),
+    monthlySalary: Number(document.getElementById('newStaffSalary').value)||0,
+    openingBalance: Number(document.getElementById('newStaffOpening').value)||0
+  };
+  logAudit('Staff added', name);
+  if(CLOUD_MODE){
+    fsDB.collection('staff').add(Object.assign({},rec,{createdAt:firebase.firestore.FieldValue.serverTimestamp()})).catch(e=>alert('Could not save: '+e.message));
+  } else {
+    rec.id = nextId('STF'); if(!db.staff) db.staff=[]; db.staff.push(rec); saveDB(db); render();
+  }
+}
+let openStaffId = null;
+function openStaffDetail(id){ openStaffId=id; editingStaffDetails=false; setScreen('staffDetail'); }
+function renderStaffDetail(){
+  if(!isOwner()) return ownerOnlyNotice();
+  const st = (db.staff||[]).find(s=>s.id===openStaffId);
+  if(!st) return `<div class="empty">Not found.</div><button class="btn btn-ghost" onclick="setScreen('staffList')">← Back</button>`;
+  const bal = staffBalance(st.id);
+  const entries = (db.staffLedger||[]).filter(e=>e.staffId===st.id).sort((a,b)=> a.date<b.date?1:-1);
+  return `
+    <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('staffList')">← Back to Staff Ledger</button>
+    <div class="card">
+      ${editingStaffDetails ? `
+        <h3>Edit details</h3>
+        <div class="field"><label>Name</label><input id="editStaffName" value="${st.name}"/></div>
+        <div class="row2">
+          <div class="field"><label>Role</label><input id="editStaffRole" value="${st.role||''}"/></div>
+          <div class="field"><label>Phone</label><input id="editStaffPhone" value="${st.phone||''}"/></div>
+        </div>
+        <div class="field"><label>Monthly salary</label><input id="editStaffSalary" type="number" value="${st.monthlySalary||0}"/></div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-primary" style="flex:1;" onclick="saveStaffEdits('${st.id}')">Save</button>
+          <button class="btn btn-ghost" style="flex:1;" onclick="editingStaffDetails=false;render()">Cancel</button>
+        </div>
+      ` : `
+        <h3>${st.name}</h3>
+        <div class="step">${st.role||''}${st.phone?' • '+st.phone:''}${st.monthlySalary?' • Salary '+fmt(st.monthlySalary)+'/month':''}</div>
+        <div class="stat" style="margin-top:10px;">
+          <div class="num" style="color:${bal>0?'var(--red-700)':'inherit'};">${fmt(Math.abs(bal))}</div>
+          <div class="lbl">${bal>0?'Pending — you owe this staff member':'Settled up'}</div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button class="btn btn-ghost" style="flex:1;" onclick="editingStaffDetails=true;render()">✏️ Edit</button>
+          <button class="btn btn-danger" style="flex:1;" onclick="deleteStaff('${st.id}')">🗑 Delete</button>
+        </div>
+      `}
+    </div>
+    <div class="card">
+      <h3>Add entry</h3>
+      <div class="row2">
+        <div class="field"><label>Type</label>
+          <select id="staffEntryType">
+            <option value="due">Salary Due (adds to pending)</option>
+            <option value="payment">Salary Payment (reduces pending)</option>
+            <option value="advance">Advance (reduces pending)</option>
+          </select>
+        </div>
+        <div class="field"><label>Amount</label><input id="staffEntryAmount" type="number" placeholder="0"/></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Date</label><input id="staffEntryDate" type="date" value="${todayStr()}"/></div>
+        <div class="field"><label>Note (optional)</label><input id="staffEntryNote" placeholder="e.g. cash, UPI"/></div>
+      </div>
+      <div class="step">Only a Salary Payment is recorded as a shop expense — an advance is money lent, not spent.</div>
+      <button class="btn btn-primary" onclick="saveStaffEntry('${st.id}')">+ Add entry</button>
+    </div>
+    <div class="card">
+      <h3>History (${entries.length})</h3>
+      ${entries.length ? entries.map(e=>`
+        <div class="list-row">
+          <div style="flex:1;"><div class="li-main">${e.type==='due'?'Salary Due':e.type==='payment'?'Salary Payment':'Advance'}</div><div class="li-sub">${e.date}${e.note?' • '+e.note:''}</div></div>
+          <div class="li-right" style="color:${e.type==='due'?'var(--red-700)':'inherit'};">${fmt(e.amount)}</div>
+        </div>`).join('') : `<div class="empty">No entries yet.</div>`}
+    </div>`;
+}
+function saveStaffEdits(id){
+  const name = document.getElementById('editStaffName').value.trim();
+  if(!name){ alert('Name cannot be empty.'); return; }
+  const updates = {
+    name,
+    role: document.getElementById('editStaffRole').value.trim(),
+    phone: document.getElementById('editStaffPhone').value.trim(),
+    monthlySalary: Number(document.getElementById('editStaffSalary').value)||0
+  };
+  logAudit('Staff details edited', name);
+  if(CLOUD_MODE) fsDB.collection('staff').doc(id).update(updates).catch(e=>alert('Could not save: '+e.message));
+  else { const s = db.staff.find(x=>x.id===id); if(s) Object.assign(s, updates); saveDB(db); }
+  editingStaffDetails = false;
+  render();
+}
+function deleteStaff(id){
+  const st = (db.staff||[]).find(s=>s.id===id);
+  if(!st) return;
+  if((db.staffLedger||[]).some(e=>e.staffId===id)){ alert("Can't delete — this staff member has salary history. Deleting would lose that record."); return; }
+  if(!confirm('Delete '+st.name+'?')) return;
+  logAudit('Staff deleted', st.name);
+  if(CLOUD_MODE) fsDB.collection('staff').doc(id).delete().catch(e=>alert('Could not delete: '+e.message));
+  else { db.staff = db.staff.filter(s=>s.id!==id); saveDB(db); }
+  setScreen('staffList');
+}
+function saveStaffEntry(staffId){
+  const type = document.getElementById('staffEntryType').value;
+  const amount = Number(document.getElementById('staffEntryAmount').value);
+  const date = document.getElementById('staffEntryDate').value;
+  const note = document.getElementById('staffEntryNote').value.trim();
+  if(!amount || amount<=0){ alert('Enter a valid amount.'); return; }
+  const st = (db.staff||[]).find(s=>s.id===staffId);
+  const entry = {staffId, type, amount, date, note};
+  logAudit('Staff '+type, (st?st.name:'')+' • '+fmt(amount));
+  if(CLOUD_MODE){
+    fsDB.collection('staffLedger').add(Object.assign({},entry,{createdAt:firebase.firestore.FieldValue.serverTimestamp()})).catch(e=>alert('Could not save: '+e.message));
+  } else {
+    entry.id = nextId('SFL'); if(!db.staffLedger) db.staffLedger=[]; db.staffLedger.push(entry); saveDB(db); render();
+  }
+  // A real payment leaves the business, so mirror it into Expenses automatically.
+  if(type==='payment'){
+    const exp = {date, category:'Staff Salary', amount, note:'Salary paid to '+(st?st.name:'')+(note?' — '+note:'')};
+    if(CLOUD_MODE) fsDB.collection('expenses').add(Object.assign({},exp,{createdAt:firebase.firestore.FieldValue.serverTimestamp()})).catch(e=>console.error(e));
+    else { exp.id = nextId('EXP'); if(!db.expenses) db.expenses=[]; db.expenses.push(exp); saveDB(db); }
+  }
+}
+window.saveStaff = saveStaff;
+window.openStaffDetail = openStaffDetail;
+window.saveStaffEdits = saveStaffEdits;
+window.deleteStaff = deleteStaff;
+window.saveStaffEntry = saveStaffEntry;
+
 function renderDashboard(){
   const today = todayStr();
   const todaySales = db.sales.filter(s=>s.date===today);
@@ -714,7 +1409,7 @@ function renderDashboard(){
 
   let alerts = '';
   if(lowStock.length) alerts += `<div class="alert amber"><span class="a-icon">⚠</span><span>${lowStock.length} item(s) running low (1 unit left) — check Stock tab.</span></div>`;
-  if(nearExpiry.length) alerts += `<div class="alert red"><span class="a-icon">⏱</span><span>${nearExpiry.length} batch(es) expiring within 90 days.</span></div>`;
+  if(nearExpiry.length) alerts += `<div class="alert red" style="cursor:pointer;" onclick="setScreen('expiryAlert')"><span class="a-icon">⏱</span><span>${nearExpiry.length} batch(es) expiring within 90 days — tap to see what to return.</span></div>`;
   if(outOfStock.length) alerts += `<div class="alert amber"><span class="a-icon">✕</span><span>${outOfStock.length} item(s) are out of stock.</span></div>`;
   if(!alerts) alerts = `<div class="alert" style="background:#E4F2EE;color:var(--teal-700);"><span class="a-icon">✓</span><span>No stock alerts right now.</span></div>`;
 
@@ -739,8 +1434,16 @@ function renderDashboard(){
       <h3>Quick actions</h3>
       <div style="display:flex;gap:8px;">
         <button class="btn btn-ghost" onclick="openParties()">👥 Parties</button>
-        <button class="btn btn-primary" onclick="setScreen('purchase')">+ Purchase</button>
+        ${isOwner() ? `<button class="btn btn-primary" onclick="setScreen('purchase')">+ Purchase</button>` : ''}
         <button class="btn btn-ghost" onclick="setScreen('sales')">+ Sale</button>
+        <button class="btn btn-ghost" onclick="setScreen('expiryAlert')">⏱ Expiry returns</button>
+        <button class="btn btn-ghost" onclick="setScreen('addExpense')">💵 Add Expense</button>
+        <button class="btn btn-ghost" onclick="setScreen('reminders')">🔔 Payment reminders</button>
+        ${isOwner() ? `<button class="btn btn-ghost" onclick="setScreen('shopSettings')">🏪 Shop details</button>
+        <button class="btn btn-ghost" onclick="setScreen('users')">👥 Users &amp; roles</button>
+        <button class="btn btn-ghost" onclick="setScreen('auditLog')">📋 Activity log</button>
+        <button class="btn btn-ghost" onclick="setScreen('staffList')">👷 Staff Ledger</button>` : ''}
+        ${CLOUD_MODE ? `<button class="btn btn-ghost" onclick="doLogout()">Sign out</button>` : ''}
       </div>
     </div>
     <div class="card">
@@ -1242,6 +1945,9 @@ function saveSale(){
     const gstAmt = net-taxable;
     totalNet += net; totalGst += gstAmt; totalDiscount += disc;
     const s = db.stock.find(x=>x.id===it.stockId);
+    // Snapshot cost at the moment of sale so Profit & Loss stays accurate even
+    // if the same medicine is repurchased later at a different rate.
+    it.costAtSale = s ? (s.purchaseRate||0) : 0;
     s.qty -= (Number(it.qty)+Number(it.freeQty));
   });
   const fullSaleTotal = totalNet;
@@ -1488,6 +2194,12 @@ function renderReports(){
       `).join('') : `<div class="empty">No purchase returns recorded.</div>`}
     </div>
     <div class="step" style="margin-top:4px;">Tap any row above to view or reprint that document.</div>
+    ${isOwner() ? `
+    <div class="card">
+      <h3>Deeper reports</h3>
+      <button class="btn btn-primary" onclick="setScreen('pnl')">📊 Profit &amp; Loss</button>
+      <button class="btn btn-ghost" style="margin-top:8px;" onclick="setScreen('expenses')">💵 Full expense tracker</button>
+    </div>` : ''}
   `;
 }
 /* ===================== PRINTABLE DOCUMENTS ===================== */
@@ -1562,9 +2274,10 @@ function renderPrintPreview(){
     <div id="printArea">
       <div class="card">
         <div class="doc-head">
-          <div class="shop">Hussain Drug House</div>
-          <div class="addr">Retail Pharmacy • GSTIN: 18ADOPH1433M1ZB</div>
-          <div class="addr">2ND Gali Kazir Bazar, Ratabari - 788735</div>
+          <div class="shop">${(db.shopInfo&&db.shopInfo.name)||'Hussain Drug House'}</div>
+          <div class="addr">Retail Pharmacy${(db.shopInfo&&db.shopInfo.gstin)?' • GSTIN: '+db.shopInfo.gstin:''}</div>
+          ${(db.shopInfo&&db.shopInfo.dlNo)?`<div class="addr">D.L. No: ${db.shopInfo.dlNo}</div>`:''}
+          <div class="addr">${(db.shopInfo&&db.shopInfo.address)||''}${(db.shopInfo&&db.shopInfo.phone)?' • '+db.shopInfo.phone:''}</div>
           <div class="doctitle">${docTitle}</div>
         </div>
         <div class="doc-meta">
