@@ -905,17 +905,28 @@ const EXPENSE_CATEGORIES = ['Staff Salary','Shop Rent','Electricity','Refreshmen
 let expenseFilter = { category:'', from:'', to:'', search:'' };
 let editingExpenseId = null;
 
+let addExpenseCategory = EXPENSE_CATEGORIES[0];
 function renderAddExpense(){
   editingExpenseId = null;
   const today = todayStr();
+  const isSalary = addExpenseCategory === 'Staff Salary';
   return `
     <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="setScreen('dashboard')">← Back to Dashboard</button>
     <div class="card">
       <h3>Add expense</h3>
       <div class="row2">
         <div class="field"><label>Date</label><input id="expDate" type="date" value="${today}"/></div>
-        <div class="field"><label>Category</label><select id="expCategory">${EXPENSE_CATEGORIES.map(x=>`<option>${x}</option>`).join('')}</select></div>
+        <div class="field"><label>Category</label><select id="expCategory" onchange="addExpenseCategory=this.value;render()">${EXPENSE_CATEGORIES.map(x=>`<option ${addExpenseCategory===x?'selected':''}>${x}</option>`).join('')}</select></div>
       </div>
+      ${isSalary ? `
+      <div class="field"><label>Staff member</label>
+        <select id="expStaffId">
+          <option value="">— Select staff (so their pending balance updates) —</option>
+          ${(db.staff||[]).map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
+        </select>
+      </div>
+      ${!(db.staff||[]).length ? `<div class="step">${isOwner() ? 'No staff added yet, add them in Staff Ledger first, or this will just log a plain expense without updating anyone balance.' : 'Staff list is not visible from this account, this will log as a plain expense. Ask the owner to link it to the right person from their side if needed.'}</div>` : ''}
+      ` : ''}
       <div class="field"><label>Amount</label><input id="expAmount" type="number" placeholder="0"/></div>
       <div class="field"><label>Note (optional)</label><input id="expNote"/></div>
       <button class="btn btn-primary" onclick="saveExpenseEntry()">+ Add expense</button>
@@ -937,10 +948,21 @@ function saveExpense(){
     if(CLOUD_MODE) fsDB.collection('expenses').add(Object.assign({},record,{createdAt:firebase.firestore.FieldValue.serverTimestamp()})).catch(e=>alert('Could not save: '+e.message));
     else { record.id = nextId('EXP'); db.expenses.push(record); saveDB(db); }
   }
+  // If this was a Staff Salary expense with a staff member picked, also record
+  // it against their ledger as a payment — so their pending balance updates.
+  const staffField = document.getElementById('expStaffId');
+  if(category==='Staff Salary' && staffField && staffField.value){
+    const staffId = staffField.value;
+    const st = (db.staff||[]).find(s=>s.id===staffId);
+    const entry = {staffId, type:'payment', amount, date, note: note||'Paid via Expenses'};
+    logAudit('Staff payment', (st?st.name:'')+' • '+fmt(amount));
+    if(CLOUD_MODE) fsDB.collection('staffLedger').add(Object.assign({},entry,{createdAt:firebase.firestore.FieldValue.serverTimestamp()})).catch(e=>console.error(e));
+    else { entry.id = nextId('SFL'); if(!db.staffLedger) db.staffLedger=[]; db.staffLedger.push(entry); saveDB(db); }
+  }
   render();
   return true;
 }
-function saveExpenseEntry(){ if(saveExpense()===false) return; setScreen('dashboard'); }
+function saveExpenseEntry(){ if(saveExpense()===false) return; addExpenseCategory = EXPENSE_CATEGORIES[0]; setScreen('dashboard'); }
 function deleteExpense(id){
   if(!confirm('Delete this expense entry?')) return;
   logAudit('Expense deleted', id);
