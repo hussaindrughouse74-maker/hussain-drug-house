@@ -1628,7 +1628,26 @@ function bumpFree(idx, n){
   purchaseDraft.items[idx].freeQty = (Number(purchaseDraft.items[idx].freeQty)||0) + n;
   render();
 }
+/* A row missing any required field used to be silently discarded on save, so
+   the bill reported success while some medicines quietly never entered stock.
+   This checks first and names exactly what is wrong. */
+function validatePurchaseRows(items){
+  const problems = [];
+  items.forEach((it,i)=>{
+    const missing = [];
+    if(!it.itemName || !String(it.itemName).trim()) missing.push('medicine name');
+    if(!it.batch || !String(it.batch).trim()) missing.push('batch');
+    if(!(Number(it.qty)>0)) missing.push('quantity');
+    if(missing.length) problems.push('Row '+(i+1)+(it.itemName?' ("'+String(it.itemName).trim()+'")':'')+': missing '+missing.join(', '));
+  });
+  if(problems.length){
+    alert('Nothing was saved — '+problems.length+' row(s) are incomplete:\n\n'+problems.join('\n')+'\n\nFill these in (or remove the row) and save again. Every row must be complete so none get lost.');
+    return false;
+  }
+  return true;
+}
 function savePurchase(){
+  if(!validatePurchaseRows(purchaseDraft.items)) return;
   if(CLOUD_MODE){ savePurchaseCloud(); return; }
   const valid = purchaseDraft.items.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
   if(!valid.length){ alert('Add at least one item with name, batch and quantity before saving.'); return; }
@@ -2719,6 +2738,7 @@ function saveEditBill(){
   if(type==='purchase'){
     const rec = db.purchases.find(p=>p.id===id);
     if(!rec) return;
+    if(!validatePurchaseRows(items)) return;
     const valid = items.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
     if(!valid.length){ alert('A purchase needs at least one item.'); return; }
 
@@ -2801,6 +2821,7 @@ async function saveEditBillCloud(){
   const { type, id, partyId, items, originalItems } = editBillContext;
   try{
     if(type==='purchase'){
+      if(!validatePurchaseRows(items)) return;
       const valid = items.filter(it=>it.itemName.trim() && it.batch.trim() && Number(it.qty)>0);
       if(!valid.length){ alert('A purchase needs at least one item.'); return; }
 
